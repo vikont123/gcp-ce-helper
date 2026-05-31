@@ -1,2 +1,15 @@
+# secrets / credentials
 .env
+.env*.local
 mytestingenv*.json
+
+# dependencies
+/node_modules
+
+# next.js build output
+/.next
+/out
+
+# misc
+*.tsbuildinfo
+next-env.d.ts
