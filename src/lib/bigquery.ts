@@ -186,6 +186,144 @@ export async function upsertResearch(args: {
   });
 }
 
+/** Save a user's research edit — sets edited_by_user TRUE (blocks future regen). */
+export async function updateResearchText(
+  company: string,
+  researchText: string
+): Promise<void> {
+  if (!company?.trim()) throw new Error("updateResearchText: empty company");
+  await client().query({
+    query: `UPDATE ${ds("research_cache")}
+      SET research_text = @researchText, edited_by_user = TRUE, updated_at = CURRENT_TIMESTAMP()
+      WHERE LOWER(TRIM(company_name)) = LOWER(TRIM(@company))`,
+    params: { company, researchText },
+    types: { company: "STRING", researchText: "STRING" },
+  });
+}
+
+// ---- Solution writes -----------------------------------------------------
+
+export async function upsertSolution(args: {
+  taskId: string;
+  focalHash: string;
+  company: string;
+  problemUnderstanding: string;
+  primarySolution: string;
+  discoveryQuestions: DiscoveryQuestion[];
+}): Promise<void> {
+  if (!args.taskId || !args.focalHash) throw new Error("upsertSolution: missing key");
+  await client().query({
+    query: `
+      MERGE ${ds("solution_cache")} T
+      USING (SELECT @taskId AS task_id, @focalHash AS focal_hash) S
+      ON T.task_id = S.task_id AND T.focal_hash = S.focal_hash
+      WHEN MATCHED AND T.edited_by_user IS NOT TRUE THEN UPDATE SET
+        company_name = @company,
+        problem_understanding = @problem,
+        primary_solution = @primary,
+        discovery_questions = PARSE_JSON(@dq),
+        edited_by_user = FALSE,
+        updated_at = CURRENT_TIMESTAMP()
+      WHEN NOT MATCHED THEN INSERT
+        (task_id, focal_hash, company_name, problem_understanding, primary_solution,
+         discovery_questions, refined_count, edited_by_user, created_at, updated_at)
+        VALUES (@taskId, @focalHash, @company, @problem, @primary,
+         PARSE_JSON(@dq), 0, FALSE, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())`,
+    params: {
+      taskId: args.taskId,
+      focalHash: args.focalHash,
+      company: args.company,
+      problem: args.problemUnderstanding,
+      primary: args.primarySolution,
+      dq: JSON.stringify(args.discoveryQuestions ?? []),
+    },
+    types: {
+      taskId: "STRING", focalHash: "STRING", company: "STRING",
+      problem: "STRING", primary: "STRING", dq: "STRING",
+    },
+  });
+}
+
+/** Save a user's solution edit — sets edited_by_user TRUE. */
+export async function updateSolutionFields(args: {
+  taskId: string;
+  focalHash: string;
+  problemUnderstanding: string;
+  primarySolution: string;
+  discoveryQuestions: DiscoveryQuestion[];
+}): Promise<void> {
+  await client().query({
+    query: `UPDATE ${ds("solution_cache")} SET
+        problem_understanding = @problem,
+        primary_solution = @primary,
+        discovery_questions = PARSE_JSON(@dq),
+        edited_by_user = TRUE,
+        updated_at = CURRENT_TIMESTAMP()
+      WHERE task_id = @taskId AND focal_hash = @focalHash`,
+    params: {
+      taskId: args.taskId, focalHash: args.focalHash,
+      problem: args.problemUnderstanding, primary: args.primarySolution,
+      dq: JSON.stringify(args.discoveryQuestions ?? []),
+    },
+    types: {
+      taskId: "STRING", focalHash: "STRING",
+      problem: "STRING", primary: "STRING", dq: "STRING",
+    },
+  });
+}
+
+// ---- Briefing writes -----------------------------------------------------
+
+export async function upsertBriefing(args: {
+  taskId: string;
+  focalHash: string;
+  company: string;
+  briefingText: string;
+  inputsHash: string;
+}): Promise<void> {
+  if (!args.taskId || !args.focalHash) throw new Error("upsertBriefing: missing key");
+  await client().query({
+    query: `
+      MERGE ${ds("briefing_cache")} T
+      USING (SELECT @taskId AS task_id, @focalHash AS focal_hash) S
+      ON T.task_id = S.task_id AND T.focal_hash = S.focal_hash
+      WHEN MATCHED AND T.edited_by_user IS NOT TRUE THEN UPDATE SET
+        company_name = @company,
+        briefing_text = @text,
+        inputs_hash = @inputsHash,
+        edited_by_user = FALSE,
+        updated_at = CURRENT_TIMESTAMP()
+      WHEN NOT MATCHED THEN INSERT
+        (task_id, focal_hash, company_name, briefing_text, inputs_hash,
+         is_refined, refined_count, edited_by_user, created_at, updated_at)
+        VALUES (@taskId, @focalHash, @company, @text, @inputsHash,
+         FALSE, 0, FALSE, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())`,
+    params: {
+      taskId: args.taskId, focalHash: args.focalHash, company: args.company,
+      text: args.briefingText, inputsHash: args.inputsHash,
+    },
+    types: {
+      taskId: "STRING", focalHash: "STRING", company: "STRING",
+      text: "STRING", inputsHash: "STRING",
+    },
+  });
+}
+
+/** Save a user's briefing edit — sets edited_by_user TRUE. */
+export async function updateBriefingText(args: {
+  taskId: string;
+  focalHash: string;
+  briefingText: string;
+}): Promise<void> {
+  await client().query({
+    query: `UPDATE ${ds("briefing_cache")}
+      SET briefing_text = @text, edited_by_user = TRUE, updated_at = CURRENT_TIMESTAMP()
+      WHERE task_id = @taskId AND focal_hash = @focalHash`,
+    params: { taskId: args.taskId, focalHash: args.focalHash, text: args.briefingText },
+    types: { taskId: "STRING", focalHash: "STRING", text: "STRING" },
+  });
+}
+
 // ---- Company resolution mapping ------------------------------------------
 // Maps a task to its real company when the Sheet account_name is a placeholder
 // (see src/lib/company.ts). Kept out of the Sheet so the original marker survives.

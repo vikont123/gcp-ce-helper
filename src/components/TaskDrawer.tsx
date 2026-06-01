@@ -9,6 +9,9 @@ import Typography from "@mui/material/Typography";
 import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
 import Chip from "@mui/material/Chip";
+import Button from "@mui/material/Button";
+import TextField from "@mui/material/TextField";
+import CircularProgress from "@mui/material/CircularProgress";
 import Tabs from "@mui/material/Tabs";
 import Tab from "@mui/material/Tab";
 import Divider from "@mui/material/Divider";
@@ -19,10 +22,15 @@ import CloseIcon from "@mui/icons-material/Close";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
 import EditNoteIcon from "@mui/icons-material/EditNote";
+import EditIcon from "@mui/icons-material/Edit";
+import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
+import RefreshIcon from "@mui/icons-material/Refresh";
+import AddIcon from "@mui/icons-material/Add";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import Markdown, { EmptyState } from "@/components/Markdown";
 import { COLUMN_LABELS, type Task } from "@/lib/tasks";
 import { avatarColor, initials, COLUMN_COLOR } from "@/lib/ui";
-import type { TaskArtifacts } from "@/lib/bigquery";
+import type { TaskArtifacts, DiscoveryQuestion } from "@/lib/bigquery";
 
 const TABS = [
   "Overview",
@@ -32,6 +40,8 @@ const TABS = [
   "Email",
   "History",
 ] as const;
+
+type ArtifactType = "research" | "solution" | "briefing";
 
 function CopyButton({ text }: { text: string }) {
   const [done, setDone] = React.useState(false);
@@ -68,12 +78,7 @@ function ArtifactHeader({
   copyText?: string;
 }) {
   return (
-    <Stack
-      direction="row"
-      alignItems="center"
-      spacing={1}
-      sx={{ mb: 1 }}
-    >
+    <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
       <Typography variant="subtitle2" sx={{ fontWeight: 600, flexGrow: 1 }}>
         {title}
       </Typography>
@@ -92,6 +97,49 @@ function ArtifactHeader({
         </Typography>
       )}
       {copyText && <CopyButton text={copyText} />}
+    </Stack>
+  );
+}
+
+/** Generate / Regenerate / Edit row shown at the top of each artifact tab. */
+function TabActions({
+  present,
+  type,
+  busyLabel,
+  onGenerate,
+  onEdit,
+}: {
+  present: boolean;
+  type: ArtifactType;
+  busyLabel: string | null;
+  onGenerate: (t: ArtifactType) => void;
+  onEdit: () => void;
+}) {
+  const busy = busyLabel !== null;
+  return (
+    <Stack direction="row" spacing={1} sx={{ mb: 2 }} alignItems="center">
+      <Button
+        size="small"
+        variant={present ? "outlined" : "contained"}
+        startIcon={
+          busy ? (
+            <CircularProgress size={14} color="inherit" />
+          ) : present ? (
+            <RefreshIcon />
+          ) : (
+            <AutoAwesomeIcon />
+          )
+        }
+        disabled={busy}
+        onClick={() => onGenerate(type)}
+      >
+        {busy ? busyLabel : present ? "Regenerate" : "Generate"}
+      </Button>
+      {present && (
+        <Button size="small" startIcon={<EditIcon />} disabled={busy} onClick={onEdit}>
+          Edit
+        </Button>
+      )}
     </Stack>
   );
 }
@@ -131,6 +179,34 @@ function LoadingBlock() {
   );
 }
 
+/** Save / Cancel footer shared by every edit form. */
+function EditActions({
+  saving,
+  onSave,
+  onCancel,
+}: {
+  saving: boolean;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
+      <Button
+        variant="contained"
+        size="small"
+        disabled={saving}
+        startIcon={saving ? <CircularProgress size={14} color="inherit" /> : <CheckIcon />}
+        onClick={onSave}
+      >
+        {saving ? "Saving…" : "Save"}
+      </Button>
+      <Button size="small" color="inherit" disabled={saving} onClick={onCancel}>
+        Cancel
+      </Button>
+    </Stack>
+  );
+}
+
 export default function TaskDrawer({
   task,
   onClose,
@@ -143,41 +219,117 @@ export default function TaskDrawer({
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
+  // Generation: a label like "Generating solution…" while a POST is in flight.
+  const [busy, setBusy] = React.useState<string | null>(null);
+  // Inline editing: which artifact is being edited + its working copy + save state.
+  const [editing, setEditing] = React.useState<ArtifactType | null>(null);
+  const [saving, setSaving] = React.useState(false);
+  const [draftText, setDraftText] = React.useState(""); // research / briefing body
+  const [draftProblem, setDraftProblem] = React.useState("");
+  const [draftPrimary, setDraftPrimary] = React.useState("");
+  const [draftQuestions, setDraftQuestions] = React.useState<DiscoveryQuestion[]>([]);
+
   const open = Boolean(task);
   const title = task ? task.company || task.accountName || `Task ${task.id}` : "";
   const color = task ? COLUMN_COLOR[task.column] : null;
+  const taskId = task?.id;
 
-  // Load artifacts whenever a (different) task is opened.
+  const reload = React.useCallback(async () => {
+    if (!taskId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/artifacts`);
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
+      setData(body.artifacts as TaskArtifacts);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [taskId]);
+
+  // Load artifacts + reset transient UI whenever a (different) task opens.
   React.useEffect(() => {
-    if (!task?.id) {
+    setEditing(null);
+    setBusy(null);
+    if (!taskId) {
       setData(null);
       return;
     }
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
+    setTab(0);
     setData(null);
-    fetch(`/api/tasks/${encodeURIComponent(task.id)}/artifacts`)
-      .then(async (res) => {
-        const body = await res.json();
-        if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
-        if (!cancelled) setData(body.artifacts as TaskArtifacts);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [task?.id]);
+    reload();
+  }, [taskId, reload]);
 
-  // Reset to the first tab each time a new task opens.
-  React.useEffect(() => {
-    if (task?.id) setTab(0);
-  }, [task?.id]);
+  const generate = async (type: ArtifactType | "all") => {
+    if (!taskId) return;
+    const labels: Record<string, string> = {
+      research: "Generating research…",
+      solution: "Generating solution…",
+      briefing: "Generating briefing…",
+      all: "Generating all…",
+    };
+    setBusy(labels[type]);
+    setError(null);
+    try {
+      const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
+      setData(body.artifacts as TaskArtifacts);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const startEdit = (type: ArtifactType) => {
+    if (type === "research") setDraftText(data?.research?.research_text ?? "");
+    if (type === "briefing") setDraftText(data?.briefing?.briefing_text ?? "");
+    if (type === "solution") {
+      setDraftProblem(data?.solution?.problem_understanding ?? "");
+      setDraftPrimary(data?.solution?.primary_solution ?? "");
+      setDraftQuestions(data?.solution?.discovery_questions ?? []);
+    }
+    setEditing(type);
+  };
+
+  const saveEdit = async () => {
+    if (!taskId || !editing) return;
+    const fields =
+      editing === "research"
+        ? { researchText: draftText }
+        : editing === "briefing"
+          ? { briefingText: draftText }
+          : {
+              problemUnderstanding: draftProblem,
+              primarySolution: draftPrimary,
+              discoveryQuestions: draftQuestions.filter((q) => q.question.trim()),
+            };
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/artifacts`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: editing, fields }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
+      setData(body.artifacts as TaskArtifacts);
+      setEditing(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   // Pipeline status dots: ✓ when the artifact exists.
   const has = {
@@ -200,9 +352,7 @@ export default function TaskDrawer({
           {/* Header */}
           <Box sx={{ px: 3, pt: 2, pb: 1 }}>
             <Stack direction="row" spacing={1.5} alignItems="center">
-              <Avatar sx={{ bgcolor: avatarColor(title) }}>
-                {initials(title)}
-              </Avatar>
+              <Avatar sx={{ bgcolor: avatarColor(title) }}>{initials(title)}</Avatar>
               <Box sx={{ minWidth: 0, flexGrow: 1 }}>
                 <Typography variant="h6" noWrap title={title}>
                   {title}
@@ -216,6 +366,21 @@ export default function TaskDrawer({
                   </Typography>
                 )}
               </Box>
+              <Button
+                size="small"
+                variant="contained"
+                startIcon={
+                  busy === "Generating all…" ? (
+                    <CircularProgress size={14} color="inherit" />
+                  ) : (
+                    <AutoAwesomeIcon />
+                  )
+                }
+                disabled={busy !== null}
+                onClick={() => generate("all")}
+              >
+                {busy === "Generating all…" ? "Generating…" : "Generate all"}
+              </Button>
               <IconButton onClick={onClose} aria-label="Close">
                 <CloseIcon />
               </IconButton>
@@ -243,12 +408,7 @@ export default function TaskDrawer({
               {/* Pipeline strip */}
               <Stack direction="row" spacing={1.25} alignItems="center">
                 {(["Research", "Solution", "Briefing"] as const).map((k) => (
-                  <Stack
-                    key={k}
-                    direction="row"
-                    spacing={0.5}
-                    alignItems="center"
-                  >
+                  <Stack key={k} direction="row" spacing={0.5} alignItems="center">
                     <Box
                       sx={{
                         width: 9,
@@ -289,7 +449,7 @@ export default function TaskDrawer({
           {/* Scrollable content */}
           <Box sx={{ px: 3, flexGrow: 1, overflowY: "auto" }}>
             {error && (
-              <Alert severity="error" sx={{ mt: 2 }}>
+              <Alert severity="error" sx={{ mt: 2 }} onClose={() => setError(null)}>
                 {error}
               </Alert>
             )}
@@ -344,7 +504,26 @@ export default function TaskDrawer({
 
             {/* Research */}
             <TabPanel value={tab} index={1}>
-              {loading ? (
+              <TabActions
+                present={Boolean(data?.research?.research_text)}
+                type="research"
+                busyLabel={busy === "Generating research…" ? "Generating…" : null}
+                onGenerate={generate}
+                onEdit={() => startEdit("research")}
+              />
+              {editing === "research" ? (
+                <>
+                  <TextField
+                    fullWidth
+                    multiline
+                    minRows={16}
+                    value={draftText}
+                    onChange={(e) => setDraftText(e.target.value)}
+                    label="Company Research (Markdown)"
+                  />
+                  <EditActions saving={saving} onSave={saveEdit} onCancel={() => setEditing(null)} />
+                </>
+              ) : loading ? (
                 <LoadingBlock />
               ) : data?.research?.research_text ? (
                 <>
@@ -367,20 +546,107 @@ export default function TaskDrawer({
                   )}
                 </>
               ) : (
-                <EmptyState message="No research yet for this company." />
+                <EmptyState message="No research yet — click Generate." />
               )}
             </TabPanel>
 
             {/* Solution */}
             <TabPanel value={tab} index={2}>
-              {loading ? (
+              <TabActions
+                present={Boolean(data?.solution)}
+                type="solution"
+                busyLabel={busy === "Generating solution…" ? "Generating…" : null}
+                onGenerate={generate}
+                onEdit={() => startEdit("solution")}
+              />
+              {editing === "solution" ? (
+                <Stack spacing={2}>
+                  <TextField
+                    fullWidth
+                    multiline
+                    minRows={3}
+                    label="Problem Understanding"
+                    value={draftProblem}
+                    onChange={(e) => setDraftProblem(e.target.value)}
+                  />
+                  <TextField
+                    fullWidth
+                    multiline
+                    minRows={6}
+                    label="Primary Solution (Markdown)"
+                    value={draftPrimary}
+                    onChange={(e) => setDraftPrimary(e.target.value)}
+                  />
+                  <Box>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
+                      Discovery Questions
+                    </Typography>
+                    <Stack spacing={1.5}>
+                      {draftQuestions.map((q, i) => (
+                        <Paper key={i} variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
+                          <Stack direction="row" spacing={1} alignItems="flex-start">
+                            <Stack spacing={1} sx={{ flexGrow: 1 }}>
+                              <TextField
+                                fullWidth
+                                size="small"
+                                label="Question"
+                                value={q.question}
+                                onChange={(e) =>
+                                  setDraftQuestions((qs) =>
+                                    qs.map((x, j) =>
+                                      j === i ? { ...x, question: e.target.value } : x
+                                    )
+                                  )
+                                }
+                              />
+                              <TextField
+                                fullWidth
+                                size="small"
+                                label="Example answer"
+                                value={q.example_answer ?? ""}
+                                onChange={(e) =>
+                                  setDraftQuestions((qs) =>
+                                    qs.map((x, j) =>
+                                      j === i ? { ...x, example_answer: e.target.value } : x
+                                    )
+                                  )
+                                }
+                              />
+                            </Stack>
+                            <IconButton
+                              size="small"
+                              aria-label="Remove question"
+                              onClick={() =>
+                                setDraftQuestions((qs) => qs.filter((_, j) => j !== i))
+                              }
+                            >
+                              <DeleteOutlineIcon fontSize="small" />
+                            </IconButton>
+                          </Stack>
+                        </Paper>
+                      ))}
+                      <Button
+                        size="small"
+                        startIcon={<AddIcon />}
+                        onClick={() =>
+                          setDraftQuestions((qs) => [...qs, { question: "", example_answer: "" }])
+                        }
+                        sx={{ alignSelf: "flex-start" }}
+                      >
+                        Add question
+                      </Button>
+                    </Stack>
+                  </Box>
+                  <EditActions saving={saving} onSave={saveEdit} onCancel={() => setEditing(null)} />
+                </Stack>
+              ) : loading ? (
                 <LoadingBlock />
               ) : data?.solution ? (
                 <>
                   {data.solutionStale && (
                     <Alert severity="warning" sx={{ mb: 2 }}>
-                      The focal comment changed since this solution was
-                      generated — it may be out of date.
+                      The focal comment changed since this solution was generated — it
+                      may be out of date.
                     </Alert>
                   )}
                   {data.solution.problem_understanding && (
@@ -412,19 +678,12 @@ export default function TaskDrawer({
                       </Typography>
                       <Stack spacing={1}>
                         {data.solution.discovery_questions.map((q, i) => (
-                          <Paper
-                            key={i}
-                            variant="outlined"
-                            sx={{ p: 1.5, borderRadius: 2 }}
-                          >
+                          <Paper key={i} variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
                             <Typography variant="body2" sx={{ fontWeight: 500 }}>
                               {q.question}
                             </Typography>
                             {q.example_answer && (
-                              <Typography
-                                variant="caption"
-                                color="text.secondary"
-                              >
+                              <Typography variant="caption" color="text.secondary">
                                 e.g. {q.example_answer}
                               </Typography>
                             )}
@@ -449,20 +708,39 @@ export default function TaskDrawer({
                   )}
                 </>
               ) : (
-                <EmptyState message="No solution generated yet." />
+                <EmptyState message="No solution yet — click Generate." />
               )}
             </TabPanel>
 
             {/* Briefing */}
             <TabPanel value={tab} index={3}>
-              {loading ? (
+              <TabActions
+                present={Boolean(data?.briefing?.briefing_text)}
+                type="briefing"
+                busyLabel={busy === "Generating briefing…" ? "Generating…" : null}
+                onGenerate={generate}
+                onEdit={() => startEdit("briefing")}
+              />
+              {editing === "briefing" ? (
+                <>
+                  <TextField
+                    fullWidth
+                    multiline
+                    minRows={20}
+                    value={draftText}
+                    onChange={(e) => setDraftText(e.target.value)}
+                    label="Meeting Briefing (Markdown)"
+                  />
+                  <EditActions saving={saving} onSave={saveEdit} onCancel={() => setEditing(null)} />
+                </>
+              ) : loading ? (
                 <LoadingBlock />
               ) : data?.briefing?.briefing_text ? (
                 <>
                   {data.briefingStale && (
                     <Alert severity="warning" sx={{ mb: 2 }}>
-                      The focal comment changed since this briefing was
-                      generated — it may be out of date.
+                      The focal comment changed since this briefing was generated — it
+                      may be out of date.
                     </Alert>
                   )}
                   <ArtifactHeader
@@ -474,7 +752,7 @@ export default function TaskDrawer({
                   <Markdown>{data.briefing.briefing_text}</Markdown>
                 </>
               ) : (
-                <EmptyState message="No briefing generated yet." />
+                <EmptyState message="No briefing yet — click Generate." />
               )}
             </TabPanel>
 
