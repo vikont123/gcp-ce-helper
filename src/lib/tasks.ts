@@ -60,8 +60,40 @@ const HEADER_TO_FIELD: Record<string, keyof Task> = {
 export function columnFor(status: string): ColumnId {
   const s = (status ?? "").trim().toLowerCase();
   if (s === "not started") return "todo";
-  if (s === "completed") return "completed";
+  // "Deprecated" is offered as a Completed-column choice, so it lands there too.
+  if (s === "completed" || s === "deprecated") return "completed";
   return "inwork";
+}
+
+/**
+ * Allowed `status` values to write back per Kanban column. When a card is dragged
+ * into In Work / Completed the user picks one of these in a dialog; Todo has a
+ * single value so it is written directly. Each value still maps back to its
+ * column via `columnFor`. Order matters: the first entry is the default.
+ */
+export const STATUS_OPTIONS: Record<ColumnId, string[]> = {
+  todo: ["Not started"],
+  inwork: [
+    "In progress",
+    "Waiting for customer",
+    "Waiting for FSR",
+    "In Research",
+    "Started",
+  ],
+  completed: ["Completed", "Deprecated"],
+};
+
+/** Default `status` value to write when a task is dragged into a column. */
+export function statusForColumn(column: ColumnId): string {
+  return STATUS_OPTIONS[column][0];
+}
+
+/** Is `status` a valid choice for `column`? (used to validate writes). */
+export function isStatusValidForColumn(
+  column: ColumnId,
+  status: string
+): boolean {
+  return STATUS_OPTIONS[column].includes(status);
 }
 
 /**

@@ -4,9 +4,42 @@ import Box from "@mui/material/Box";
 import Stack from "@mui/material/Stack";
 import Typography from "@mui/material/Typography";
 import Skeleton from "@mui/material/Skeleton";
+import { useDraggable, useDroppable } from "@dnd-kit/core";
 import TaskCard from "@/components/TaskCard";
 import { COLUMN_LABELS, type ColumnId, type Task } from "@/lib/tasks";
 import { COLUMN_COLOR } from "@/lib/ui";
+
+// Wraps a card so it can be picked up. Tasks without an id can't be persisted,
+// so they stay non-draggable.
+function DraggableTaskCard({
+  task,
+  onOpen,
+}: {
+  task: Task;
+  onOpen: (task: Task) => void;
+}) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: task.id,
+    data: { task },
+    disabled: !task.id,
+  });
+
+  return (
+    <Box
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      sx={{
+        // Pointer sensor needs this so touch-drag doesn't scroll the column.
+        touchAction: "none",
+        cursor: task.id ? "grab" : "default",
+        opacity: isDragging ? 0.4 : 1,
+      }}
+    >
+      <TaskCard task={task} onOpen={onOpen} />
+    </Box>
+  );
+}
 
 export default function Column({
   columnId,
@@ -20,6 +53,7 @@ export default function Column({
   onOpen: (task: Task) => void;
 }) {
   const color = COLUMN_COLOR[columnId];
+  const { setNodeRef, isOver } = useDroppable({ id: columnId });
 
   return (
     <Box
@@ -68,14 +102,20 @@ export default function Column({
         </Box>
       </Stack>
 
-      {/* Scrollable card list */}
+      {/* Scrollable, droppable card list */}
       <Stack
+        ref={setNodeRef}
         spacing={1.25}
         sx={{
           px: 1,
           pb: 2,
           overflowY: "auto",
           flex: 1,
+          borderRadius: 3,
+          outline: isOver ? `2px dashed ${color.text}` : "2px dashed transparent",
+          outlineOffset: -2,
+          bgcolor: isOver ? color.bg : "transparent",
+          transition: "background-color 120ms ease, outline-color 120ms ease",
         }}
       >
         {loading
@@ -84,11 +124,11 @@ export default function Column({
                 key={i}
                 variant="rounded"
                 height={132}
-                sx={{ borderRadius: 3 }}
+                sx={{ borderRadius: 3, flexShrink: 0 }}
               />
             ))
           : tasks.map((task) => (
-              <TaskCard
+              <DraggableTaskCard
                 key={task.id || task.accountName}
                 task={task}
                 onOpen={onOpen}
@@ -101,9 +141,17 @@ export default function Column({
               py: 4,
               textAlign: "center",
               color: "text.secondary",
+              // Keep an empty column tall enough to be an easy drop target.
+              flex: 1,
+              minHeight: 120,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
             }}
           >
-            <Typography variant="body2">No tasks</Typography>
+            <Typography variant="body2">
+              {isOver ? "Drop here" : "No tasks"}
+            </Typography>
           </Box>
         )}
       </Stack>
