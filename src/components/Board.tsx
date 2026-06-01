@@ -19,7 +19,7 @@ import {
 import AppHeader from "@/components/AppHeader";
 import Column from "@/components/Column";
 import TaskCard from "@/components/TaskCard";
-import TaskDetail from "@/components/TaskDetail";
+import TaskDrawer from "@/components/TaskDrawer";
 import MoveDialog, { type MoveRequest } from "@/components/MoveDialog";
 import {
   COLUMN_ORDER,
@@ -237,7 +237,7 @@ export default function Board() {
         )}
       </Box>
 
-      <TaskDetail task={selected} onClose={() => setSelected(null)} />
+      <TaskDrawer task={selected} onClose={() => setSelected(null)} />
 
       <MoveDialog
         request={moveRequest}
