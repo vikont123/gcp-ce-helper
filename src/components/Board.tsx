@@ -184,6 +184,7 @@ export default function Board() {
         onQueryChange={setQuery}
         onRefresh={load}
         refreshing={loading}
+        onResearchComplete={load}
       />
 
       <Box sx={{ flex: 1, minHeight: 0, p: 2 }}>

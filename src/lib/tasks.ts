@@ -20,6 +20,12 @@ export interface Task {
   lastUpdate: string;
   fsr: string;
   accountName: string;
+  /**
+   * Real customer company for display and company-keyed lookups. Defaults to
+   * accountName; overridden server-side when account_name is a placeholder
+   * (see src/lib/company.ts and the resolution map in src/lib/bigquery.ts).
+   */
+  company: string;
   meetingLocation: string;
   alias: string;
   ceAssigned: string;
@@ -123,6 +129,7 @@ export function rowsToTasks(rows: string[][]): Task[] {
       lastUpdate: "",
       fsr: "",
       accountName: "",
+      company: "",
       meetingLocation: "",
       alias: "",
       ceAssigned: "",
@@ -143,6 +150,9 @@ export function rowsToTasks(rows: string[][]): Task[] {
     });
 
     task.column = columnFor(task.status);
+    // Default the display company to account_name; the API layer overrides it
+    // with the resolved real company when one was recorded.
+    task.company = task.accountName;
     return task;
   });
 }

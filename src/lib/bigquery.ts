@@ -152,6 +152,121 @@ export async function getResearch(
   };
 }
 
+/**
+ * Upsert a generated research artifact by company name. Never overwrites a row a
+ * user has edited (`edited_by_user = TRUE`). Parameterized DML (not a streaming
+ * insert) so the row stays immediately re-updatable.
+ */
+export async function upsertResearch(args: {
+  company: string;
+  researchText: string;
+  deepResearchText?: string | null;
+}): Promise<void> {
+  const company = args.company?.trim();
+  if (!company) throw new Error("upsertResearch: empty company");
+  await client().query({
+    query: `
+      MERGE ${ds("research_cache")} T
+      USING (SELECT @company AS company_name) S
+      ON LOWER(TRIM(T.company_name)) = LOWER(TRIM(S.company_name))
+      WHEN MATCHED AND T.edited_by_user IS NOT TRUE THEN UPDATE SET
+        research_text = @researchText,
+        deep_research_text = @deepResearchText,
+        edited_by_user = FALSE,
+        updated_at = CURRENT_TIMESTAMP()
+      WHEN NOT MATCHED THEN INSERT
+        (company_name, research_text, deep_research_text, edited_by_user, updated_at)
+        VALUES (@company, @researchText, @deepResearchText, FALSE, CURRENT_TIMESTAMP())`,
+    params: {
+      company,
+      researchText: args.researchText,
+      deepResearchText: args.deepResearchText ?? null,
+    },
+    types: { company: "STRING", researchText: "STRING", deepResearchText: "STRING" },
+  });
+}
+
+// ---- Company resolution mapping ------------------------------------------
+// Maps a task to its real company when the Sheet account_name is a placeholder
+// (see src/lib/company.ts). Kept out of the Sheet so the original marker survives.
+
+let _resolutionTableReady = false;
+async function ensureResolutionTable(): Promise<void> {
+  if (_resolutionTableReady) return;
+  await client().query({
+    query: `CREATE TABLE IF NOT EXISTS ${ds("company_resolution")} (
+      task_id STRING NOT NULL,
+      account_name STRING,
+      resolved_company STRING,
+      used_fallback BOOL,
+      updated_at TIMESTAMP
+    )`,
+  });
+  _resolutionTableReady = true;
+}
+
+export async function upsertCompanyResolution(args: {
+  taskId: string;
+  accountName: string;
+  company: string;
+  usedFallback: boolean;
+}): Promise<void> {
+  if (!args.taskId) return;
+  await ensureResolutionTable();
+  await client().query({
+    query: `
+      MERGE ${ds("company_resolution")} T
+      USING (SELECT @taskId AS task_id) S
+      ON T.task_id = S.task_id
+      WHEN MATCHED THEN UPDATE SET
+        account_name = @accountName,
+        resolved_company = @company,
+        used_fallback = @usedFallback,
+        updated_at = CURRENT_TIMESTAMP()
+      WHEN NOT MATCHED THEN INSERT
+        (task_id, account_name, resolved_company, used_fallback, updated_at)
+        VALUES (@taskId, @accountName, @company, @usedFallback, CURRENT_TIMESTAMP())`,
+    params: {
+      taskId: args.taskId,
+      accountName: args.accountName,
+      company: args.company,
+      usedFallback: args.usedFallback,
+    },
+    types: {
+      taskId: "STRING",
+      accountName: "STRING",
+      company: "STRING",
+      usedFallback: "BOOL",
+    },
+  });
+}
+
+/** Resolved company for one task, or null if none recorded. */
+export async function getResolvedCompany(taskId: string): Promise<string | null> {
+  if (!taskId) return null;
+  await ensureResolutionTable();
+  const rows = await queryRows<{ resolved_company: string | null }>(
+    `SELECT resolved_company FROM ${ds("company_resolution")}
+     WHERE task_id = @taskId LIMIT 1`,
+    { taskId }
+  );
+  return rows[0]?.resolved_company ?? null;
+}
+
+/** task_id -> resolved company, for annotating the whole board at once. */
+export async function getResolutionMap(): Promise<Record<string, string>> {
+  await ensureResolutionTable();
+  const rows = await queryRows<{ task_id: string; resolved_company: string | null }>(
+    `SELECT task_id, resolved_company FROM ${ds("company_resolution")}`,
+    {}
+  );
+  const map: Record<string, string> = {};
+  for (const r of rows) {
+    if (r.resolved_company) map[r.task_id] = r.resolved_company;
+  }
+  return map;
+}
+
 export async function getBilling(
   company: string
 ): Promise<BillingArtifact | null> {

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readSheetRows } from "@/lib/sheets";
 import { rowsToTasks } from "@/lib/tasks";
-import { getTaskArtifacts } from "@/lib/bigquery";
+import { getTaskArtifacts, getResolvedCompany } from "@/lib/bigquery";
 
 // Read fresh each time; artifacts can change between visits.
 export const dynamic = "force-dynamic";
@@ -30,9 +30,13 @@ export async function GET(
       );
     }
 
+    // Research/billing are keyed by company; account_name may be a placeholder,
+    // so prefer the resolved company recorded during generation.
+    const company = (await getResolvedCompany(id)) ?? task.accountName;
+
     const artifacts = await getTaskArtifacts({
       taskId: id,
-      company: task.accountName,
+      company,
       focalComment: task.comment,
     });
 

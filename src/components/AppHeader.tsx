@@ -12,6 +12,7 @@ import Chip from "@mui/material/Chip";
 import SearchIcon from "@mui/icons-material/Search";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import ViewKanbanOutlinedIcon from "@mui/icons-material/ViewKanbanOutlined";
+import GenerateResearchDialog from "@/components/GenerateResearchDialog";
 
 export default function AppHeader({
   ceName,
@@ -19,12 +20,14 @@ export default function AppHeader({
   onQueryChange,
   onRefresh,
   refreshing,
+  onResearchComplete,
 }: {
   ceName: string;
   query: string;
   onQueryChange: (q: string) => void;
   onRefresh: () => void;
   refreshing: boolean;
+  onResearchComplete?: () => void;
 }) {
   return (
     <AppBar position="sticky">
@@ -72,6 +75,8 @@ export default function AppHeader({
             sx={{ display: { xs: "none", sm: "flex" } }}
           />
         </Tooltip>
+
+        <GenerateResearchDialog onComplete={onResearchComplete} />
 
         <Tooltip title="Refresh">
           <span>

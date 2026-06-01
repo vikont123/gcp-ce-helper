@@ -47,7 +47,7 @@ export default function TaskCard({
   task: Task;
   onOpen: (task: Task) => void;
 }) {
-  const title = task.accountName || `Task ${task.id}`;
+  const title = task.company || task.accountName || `Task ${task.id}`;
   const color = COLUMN_COLOR[task.column];
   const needs = task.needs && task.needs.toLowerCase() !== "none" ? task.needs : "";
   // Prefer the CE's "work done" note (filled on completion); fall back to the

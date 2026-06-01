@@ -144,7 +144,7 @@ export default function TaskDrawer({
   const [error, setError] = React.useState<string | null>(null);
 
   const open = Boolean(task);
-  const title = task ? task.accountName || `Task ${task.id}` : "";
+  const title = task ? task.company || task.accountName || `Task ${task.id}` : "";
   const color = task ? COLUMN_COLOR[task.column] : null;
 
   // Load artifacts whenever a (different) task is opened.
@@ -210,6 +210,9 @@ export default function TaskDrawer({
                 {task.id && (
                   <Typography variant="caption" color="text.secondary">
                     #{task.id}
+                    {task.accountName && task.accountName !== title && (
+                      <> · account: {task.accountName}</>
+                    )}
                   </Typography>
                 )}
               </Box>

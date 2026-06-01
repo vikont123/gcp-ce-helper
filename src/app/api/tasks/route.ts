@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readSheetRows, updateTaskFields } from "@/lib/sheets";
+import { getResolutionMap } from "@/lib/bigquery";
 import {
   rowsToTasks,
   filterTasks,
@@ -26,6 +27,18 @@ export async function GET() {
   try {
     const rows = await readSheetRows();
     const tasks = filterTasks(rowsToTasks(rows), ceName);
+
+    // Overlay resolved real company names where account_name was a placeholder.
+    // A missing map (e.g. table not created yet) must not break the board.
+    try {
+      const resolved = await getResolutionMap();
+      for (const t of tasks) {
+        if (resolved[t.id]) t.company = resolved[t.id];
+      }
+    } catch {
+      /* resolution is best-effort; fall back to account_name */
+    }
+
     return NextResponse.json({ tasks, ceName });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
