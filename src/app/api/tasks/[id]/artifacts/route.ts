@@ -8,6 +8,7 @@ import {
   updateResearchText,
   updateSolutionFields,
   updateBriefingText,
+  updateEmailFields,
   type DiscoveryQuestion,
 } from "@/lib/bigquery";
 
@@ -39,12 +40,11 @@ export async function GET(
     }
 
     // Research/billing are keyed by company; account_name may be a placeholder,
-    // so prefer the resolved company recorded during generation.
-    const company = (await getResolvedCompany(id)) ?? task.accountName;
-
+    // so getTaskArtifacts resolves the real company (recorded during generation)
+    // concurrently with the task-keyed reads, falling back to account_name.
     const artifacts = await getTaskArtifacts({
       taskId: id,
-      company,
+      accountName: task.accountName,
       focalComment: task.comment,
     });
 
@@ -103,6 +103,15 @@ export async function PATCH(
         taskId: id,
         focalHash: fHash,
         briefingText: String(fields.briefingText ?? ""),
+      });
+    } else if (type === "email") {
+      await updateEmailFields({
+        taskId: id,
+        focalHash: fHash,
+        followupSubject: String(fields.followupSubject ?? ""),
+        followupText: String(fields.followupText ?? ""),
+        discoverySubject: String(fields.discoverySubject ?? ""),
+        discoveryText: String(fields.discoveryText ?? ""),
       });
     } else {
       return NextResponse.json({ error: `Unknown artifact type: ${type}` }, { status: 400 });

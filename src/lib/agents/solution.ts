@@ -1,9 +1,9 @@
-// GCP-architecture / solution agent. Server-only. One Claude call returns a
+// GCP-architecture / solution agent. Server-only. One Gemini call returns a
 // structured solution matching solution_cache: a problem restatement, a primary
 // GCP architecture narrative, and discovery questions to ask the customer.
 
-import { claudeComplete } from "@/lib/llm";
-import type { DiscoveryQuestion } from "@/lib/bigquery";
+import { geminiComplete } from "@/lib/llm";
+import type { DiscoveryQuestion, DiscoveryAnswer } from "@/lib/bigquery";
 
 export interface SolutionResult {
   problemUnderstanding: string;
@@ -44,7 +44,7 @@ export async function generateSolution(args: {
   focal: string;
   research?: string;
 }): Promise<SolutionResult> {
-  const raw = await claudeComplete({
+  const raw = await geminiComplete({
     system: SYSTEM,
     user: userPrompt(args.company, args.focal, args.research),
     maxTokens: 3000,
@@ -67,4 +67,64 @@ export async function generateSolution(args: {
     primarySolution: String(obj.primary_solution ?? "").trim(),
     discoveryQuestions,
   };
+}
+
+const REFINE_SYSTEM = `${SYSTEM} You are now refining an earlier proposal using the customer's answers to your discovery questions plus extra context the CE added. Sharpen and tailor the architecture to what you now know; resolve assumptions the answers settle, drop options the answers rule out, and add specifics the answers enable.`;
+
+function refinePrompt(args: {
+  company: string;
+  focal: string;
+  research?: string;
+  problemUnderstanding: string;
+  primarySolution: string;
+  discoveryQuestions: DiscoveryQuestion[];
+  answers: DiscoveryAnswer[];
+  comment: string;
+}): string {
+  const answerByQuestion = new Map(
+    args.answers.map((a) => [a.question.trim(), a.answer.trim()])
+  );
+  const qa = args.discoveryQuestions
+    .map((q) => {
+      const a = answerByQuestion.get(q.question.trim());
+      return `- Q: ${q.question}\n  A: ${a && a.length ? a : "(no answer given)"}`;
+    })
+    .join("\n");
+
+  return `Customer: ${args.company}
+Meeting request / focal comment:
+${args.focal}
+${args.research ? `\nCompany research:\n${args.research}\n` : ""}
+Original problem understanding:
+${args.problemUnderstanding}
+
+Original proposed solution:
+${args.primarySolution}
+
+Customer answers to the discovery questions:
+${qa || "(none)"}
+${args.comment.trim() ? `\nAdditional context from the CE:\n${args.comment.trim()}\n` : ""}
+Write a REFINED GCP solution in Markdown (2-5 paragraphs, with bolded lead-ins or a short
+bullet list where it helps). Name specific GCP services and tie every recommendation to what
+the answers and context above revealed. Do not restate the questions; output only the refined
+solution prose.`;
+}
+
+/** Refine an existing solution using the customer's answers + extra CE context. */
+export async function generateRefinedSolution(args: {
+  company: string;
+  focal: string;
+  research?: string;
+  problemUnderstanding: string;
+  primarySolution: string;
+  discoveryQuestions: DiscoveryQuestion[];
+  answers: DiscoveryAnswer[];
+  comment: string;
+}): Promise<{ refinedSolution: string }> {
+  const refinedSolution = await geminiComplete({
+    system: REFINE_SYSTEM,
+    user: refinePrompt(args),
+    maxTokens: 3000,
+  });
+  return { refinedSolution: refinedSolution.trim() };
 }

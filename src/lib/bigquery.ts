@@ -40,6 +40,12 @@ export interface DiscoveryQuestion {
   example_answer?: string;
 }
 
+/** A customer's answer to a discovery question, captured for the refine flow. */
+export interface DiscoveryAnswer {
+  question: string;
+  answer: string;
+}
+
 export interface ResearchArtifact {
   company_name: string;
   research_text: string | null;
@@ -55,7 +61,7 @@ export interface SolutionArtifact {
   problem_understanding: string | null;
   primary_solution: string | null;
   discovery_questions: DiscoveryQuestion[];
-  answers: unknown;
+  answers: DiscoveryAnswer[];
   additional_context: string | null;
   refined_solution: string | null;
   refined_count: number | null;
@@ -83,6 +89,20 @@ export interface BillingArtifact {
   updated_at: string | null;
 }
 
+/** Two customer-facing email templates (follow-up + discovery), keyed per task. */
+export interface EmailArtifact {
+  task_id: string;
+  focal_hash: string;
+  company_name: string | null;
+  followup_subject: string | null;
+  followup_text: string | null;
+  discovery_subject: string | null;
+  discovery_text: string | null;
+  edited_by_user: boolean | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
 /** Everything we show for one task, plus staleness info for the UI banner. */
 export interface TaskArtifacts {
   focalHash: string;
@@ -90,9 +110,11 @@ export interface TaskArtifacts {
   solution: SolutionArtifact | null;
   briefing: BriefingArtifact | null;
   billing: BillingArtifact | null;
+  email: EmailArtifact | null;
   /** A solution exists for this task but under a different (older) focal_hash. */
   solutionStale: boolean;
   briefingStale: boolean;
+  emailStale: boolean;
 }
 
 // ---- Helpers -------------------------------------------------------------
@@ -103,6 +125,17 @@ async function queryRows<T>(
 ): Promise<T[]> {
   const [rows] = await client().query({ query, params });
   return rows as T[];
+}
+
+/**
+ * True if an error is BigQuery's "table doesn't exist yet". Read helpers no longer
+ * run CREATE TABLE on the hot path (that DDL is a separate job that serialized in
+ * front of every read); instead they treat a missing table as "no data". The
+ * table is created lazily by the first write (the upsert/update helpers).
+ */
+function isMissingTable(err: unknown): boolean {
+  const m = err instanceof Error ? err.message : String(err);
+  return /Not found: Table|Table .* (?:was )?not found|does not exist/i.test(m);
 }
 
 /** BigQuery JSON columns may come back as a string or an object; normalize. */
@@ -272,6 +305,41 @@ export async function updateSolutionFields(args: {
   });
 }
 
+/**
+ * Save a refinement pass: the customer's answers + extra context and the newly
+ * refined solution. Bumps refined_count. A direct UPDATE (unlike upsertSolution's
+ * MERGE) so it applies even to rows a user has edited — refine is user-initiated.
+ */
+export async function upsertSolutionRefinement(args: {
+  taskId: string;
+  focalHash: string;
+  answers: DiscoveryAnswer[];
+  additionalContext: string;
+  refinedSolution: string;
+}): Promise<void> {
+  if (!args.taskId || !args.focalHash) throw new Error("upsertSolutionRefinement: missing key");
+  await client().query({
+    query: `UPDATE ${ds("solution_cache")} SET
+        answers = PARSE_JSON(@answers),
+        additional_context = @ctx,
+        refined_solution = @refined,
+        refined_count = IFNULL(refined_count, 0) + 1,
+        updated_at = CURRENT_TIMESTAMP()
+      WHERE task_id = @taskId AND focal_hash = @focalHash`,
+    params: {
+      taskId: args.taskId,
+      focalHash: args.focalHash,
+      answers: JSON.stringify(args.answers ?? []),
+      ctx: args.additionalContext,
+      refined: args.refinedSolution,
+    },
+    types: {
+      taskId: "STRING", focalHash: "STRING",
+      answers: "STRING", ctx: "STRING", refined: "STRING",
+    },
+  });
+}
+
 // ---- Briefing writes -----------------------------------------------------
 
 export async function upsertBriefing(args: {
@@ -322,6 +390,148 @@ export async function updateBriefingText(args: {
     params: { taskId: args.taskId, focalHash: args.focalHash, text: args.briefingText },
     types: { taskId: "STRING", focalHash: "STRING", text: "STRING" },
   });
+}
+
+// ---- Email writes/reads --------------------------------------------------
+// email_cache may pre-exist from the original pipeline with a legacy single-email
+// schema (email_text / uploaded_notes / links). We create it if missing, then add
+// the two-template columns if absent — both idempotent, neither destructive.
+
+let _emailTableReady = false;
+async function ensureEmailTable(): Promise<void> {
+  if (_emailTableReady) return;
+  await client().query({
+    query: `CREATE TABLE IF NOT EXISTS ${ds("email_cache")} (
+      task_id STRING NOT NULL,
+      focal_hash STRING NOT NULL,
+      company_name STRING,
+      followup_subject STRING,
+      followup_text STRING,
+      discovery_subject STRING,
+      discovery_text STRING,
+      edited_by_user BOOL,
+      created_at TIMESTAMP,
+      updated_at TIMESTAMP
+    )`,
+  });
+  await client().query({
+    query: `ALTER TABLE ${ds("email_cache")}
+      ADD COLUMN IF NOT EXISTS followup_subject STRING,
+      ADD COLUMN IF NOT EXISTS followup_text STRING,
+      ADD COLUMN IF NOT EXISTS discovery_subject STRING,
+      ADD COLUMN IF NOT EXISTS discovery_text STRING`,
+  });
+  _emailTableReady = true;
+}
+
+export async function upsertEmail(args: {
+  taskId: string;
+  focalHash: string;
+  company: string;
+  followupSubject: string;
+  followupText: string;
+  discoverySubject: string;
+  discoveryText: string;
+}): Promise<void> {
+  if (!args.taskId || !args.focalHash) throw new Error("upsertEmail: missing key");
+  await ensureEmailTable();
+  await client().query({
+    query: `
+      MERGE ${ds("email_cache")} T
+      USING (SELECT @taskId AS task_id, @focalHash AS focal_hash) S
+      ON T.task_id = S.task_id AND T.focal_hash = S.focal_hash
+      WHEN MATCHED AND T.edited_by_user IS NOT TRUE THEN UPDATE SET
+        company_name = @company,
+        followup_subject = @fs,
+        followup_text = @ft,
+        discovery_subject = @ds,
+        discovery_text = @dt,
+        edited_by_user = FALSE,
+        updated_at = CURRENT_TIMESTAMP()
+      WHEN NOT MATCHED THEN INSERT
+        (task_id, focal_hash, company_name, followup_subject, followup_text,
+         discovery_subject, discovery_text, edited_by_user, created_at, updated_at)
+        VALUES (@taskId, @focalHash, @company, @fs, @ft, @ds, @dt,
+         FALSE, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())`,
+    params: {
+      taskId: args.taskId, focalHash: args.focalHash, company: args.company,
+      fs: args.followupSubject, ft: args.followupText,
+      ds: args.discoverySubject, dt: args.discoveryText,
+    },
+    types: {
+      taskId: "STRING", focalHash: "STRING", company: "STRING",
+      fs: "STRING", ft: "STRING", ds: "STRING", dt: "STRING",
+    },
+  });
+}
+
+/** Save a user's email edit — sets edited_by_user TRUE. */
+export async function updateEmailFields(args: {
+  taskId: string;
+  focalHash: string;
+  followupSubject: string;
+  followupText: string;
+  discoverySubject: string;
+  discoveryText: string;
+}): Promise<void> {
+  await ensureEmailTable();
+  await client().query({
+    query: `UPDATE ${ds("email_cache")} SET
+        followup_subject = @fs,
+        followup_text = @ft,
+        discovery_subject = @ds,
+        discovery_text = @dt,
+        edited_by_user = TRUE,
+        updated_at = CURRENT_TIMESTAMP()
+      WHERE task_id = @taskId AND focal_hash = @focalHash`,
+    params: {
+      taskId: args.taskId, focalHash: args.focalHash,
+      fs: args.followupSubject, ft: args.followupText,
+      ds: args.discoverySubject, dt: args.discoveryText,
+    },
+    types: {
+      taskId: "STRING", focalHash: "STRING",
+      fs: "STRING", ft: "STRING", ds: "STRING", dt: "STRING",
+    },
+  });
+}
+
+function mapEmail(r: Record<string, unknown>): EmailArtifact {
+  return {
+    task_id: String(r.task_id),
+    focal_hash: String(r.focal_hash),
+    company_name: (r.company_name as string) ?? null,
+    followup_subject: (r.followup_subject as string) ?? null,
+    followup_text: (r.followup_text as string) ?? null,
+    discovery_subject: (r.discovery_subject as string) ?? null,
+    discovery_text: (r.discovery_text as string) ?? null,
+    edited_by_user: (r.edited_by_user as boolean) ?? null,
+    created_at: tsString(r.created_at),
+    updated_at: tsString(r.updated_at),
+  };
+}
+
+export async function getEmail(
+  taskId: string,
+  fHash: string
+): Promise<{ artifact: EmailArtifact | null; stale: boolean }> {
+  if (!taskId) return { artifact: null, stale: false };
+  let rows: Record<string, unknown>[];
+  try {
+    rows = await queryRows<Record<string, unknown>>(
+      `SELECT * FROM ${ds("email_cache")}
+       WHERE task_id = @taskId
+       ORDER BY updated_at DESC LIMIT 1`,
+      { taskId }
+    );
+  } catch (err) {
+    if (isMissingTable(err)) return { artifact: null, stale: false };
+    throw err;
+  }
+  const r = rows[0];
+  if (!r) return { artifact: null, stale: false };
+  const artifact = mapEmail(r);
+  return { artifact, stale: artifact.focal_hash !== fHash };
 }
 
 // ---- Company resolution mapping ------------------------------------------
@@ -382,22 +592,31 @@ export async function upsertCompanyResolution(args: {
 /** Resolved company for one task, or null if none recorded. */
 export async function getResolvedCompany(taskId: string): Promise<string | null> {
   if (!taskId) return null;
-  await ensureResolutionTable();
-  const rows = await queryRows<{ resolved_company: string | null }>(
-    `SELECT resolved_company FROM ${ds("company_resolution")}
-     WHERE task_id = @taskId LIMIT 1`,
-    { taskId }
-  );
-  return rows[0]?.resolved_company ?? null;
+  try {
+    const rows = await queryRows<{ resolved_company: string | null }>(
+      `SELECT resolved_company FROM ${ds("company_resolution")}
+       WHERE task_id = @taskId LIMIT 1`,
+      { taskId }
+    );
+    return rows[0]?.resolved_company ?? null;
+  } catch (err) {
+    if (isMissingTable(err)) return null;
+    throw err;
+  }
 }
 
 /** task_id -> resolved company, for annotating the whole board at once. */
 export async function getResolutionMap(): Promise<Record<string, string>> {
-  await ensureResolutionTable();
-  const rows = await queryRows<{ task_id: string; resolved_company: string | null }>(
-    `SELECT task_id, resolved_company FROM ${ds("company_resolution")}`,
-    {}
-  );
+  let rows: { task_id: string; resolved_company: string | null }[];
+  try {
+    rows = await queryRows<{ task_id: string; resolved_company: string | null }>(
+      `SELECT task_id, resolved_company FROM ${ds("company_resolution")}`,
+      {}
+    );
+  } catch (err) {
+    if (isMissingTable(err)) return {};
+    throw err;
+  }
   const map: Record<string, string> = {};
   for (const r of rows) {
     if (r.resolved_company) map[r.task_id] = r.resolved_company;
@@ -434,7 +653,7 @@ function mapSolution(r: Record<string, unknown>): SolutionArtifact {
     problem_understanding: (r.problem_understanding as string) ?? null,
     primary_solution: (r.primary_solution as string) ?? null,
     discovery_questions: parseJson<DiscoveryQuestion[]>(r.discovery_questions, []),
-    answers: parseJson<unknown>(r.answers, null),
+    answers: parseJson<DiscoveryAnswer[]>(r.answers, []),
     additional_context: (r.additional_context as string) ?? null,
     refined_solution: (r.refined_solution as string) ?? null,
     refined_count: (r.refined_count as number) ?? null,
@@ -493,18 +712,33 @@ export async function getBriefing(
   return { artifact, stale: artifact.focal_hash !== fHash };
 }
 
-/** Fetch all artifacts for a task in parallel. */
+/**
+ * Fetch all artifacts for a task in parallel.
+ *
+ * Company resolution (needed only by research/billing, which are company-keyed)
+ * runs concurrently with the task-keyed reads (solution/briefing/email) instead
+ * of being awaited up front — so the resolution round-trip no longer adds to the
+ * critical path. Pass `company` when it's already resolved (the generate path) to
+ * skip the lookup entirely; otherwise it resolves from the task, falling back to
+ * `accountName`.
+ */
 export async function getTaskArtifacts(args: {
   taskId: string;
-  company: string;
   focalComment: string;
+  company?: string;
+  accountName?: string;
 }): Promise<TaskArtifacts> {
   const fHash = focalHash(args.focalComment);
-  const [research, billing, sol, brief] = await Promise.all([
-    getResearch(args.company),
-    getBilling(args.company),
+  const companyP: Promise<string> =
+    args.company != null
+      ? Promise.resolve(args.company)
+      : getResolvedCompany(args.taskId).then((c) => c ?? args.accountName ?? "");
+  const [research, billing, sol, brief, email] = await Promise.all([
+    companyP.then(getResearch),
+    companyP.then(getBilling),
     getSolution(args.taskId, fHash),
     getBriefing(args.taskId, fHash),
+    getEmail(args.taskId, fHash),
   ]);
   return {
     focalHash: fHash,
@@ -512,7 +746,9 @@ export async function getTaskArtifacts(args: {
     billing,
     solution: sol.artifact,
     briefing: brief.artifact,
+    email: email.artifact,
     solutionStale: sol.stale,
     briefingStale: brief.stale,
+    emailStale: email.stale,
   };
 }

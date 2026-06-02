@@ -13,7 +13,7 @@ export const maxDuration = 800;
  * GET /api/research/batch — Server-Sent Events.
  *
  * Resolves the active CE's unique companies from the sheet, then for each one
- * generates a grounded research artifact (Gemini facts -> Claude format) and
+ * generates a grounded research artifact (Gemini facts -> Gemini format) and
  * upserts it into BigQuery. Streams one `company` event per company plus a final
  * `done` event so the UI can show live per-company progress.
  */

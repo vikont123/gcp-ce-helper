@@ -3,7 +3,7 @@
 // established briefing_cache format).
 
 import crypto from "node:crypto";
-import { claudeComplete } from "@/lib/llm";
+import { geminiComplete } from "@/lib/llm";
 
 export interface BriefingInput {
   company: string;
@@ -52,7 +52,7 @@ include **GCP Strengths:** and **GCP Weaknesses & Mitigation:**. Keep it scannab
 }
 
 export async function generateBriefing(i: BriefingInput): Promise<BriefingResult> {
-  const briefingText = await claudeComplete({
+  const briefingText = await geminiComplete({
     system: SYSTEM,
     user: userPrompt(i),
     maxTokens: 4000,

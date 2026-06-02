@@ -30,7 +30,7 @@ import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import Markdown, { EmptyState } from "@/components/Markdown";
 import { COLUMN_LABELS, type Task } from "@/lib/tasks";
 import { avatarColor, initials, COLUMN_COLOR } from "@/lib/ui";
-import type { TaskArtifacts, DiscoveryQuestion } from "@/lib/bigquery";
+import type { TaskArtifacts, DiscoveryQuestion, DiscoveryAnswer } from "@/lib/bigquery";
 
 const TABS = [
   "Overview",
@@ -41,7 +41,42 @@ const TABS = [
   "History",
 ] as const;
 
-type ArtifactType = "research" | "solution" | "briefing";
+type ArtifactType = "research" | "solution" | "briefing" | "email";
+
+/** A generation stage the client can drive; "refine" carries answers + comment. */
+type GenStage = {
+  type: ArtifactType | "refine";
+  body?: Record<string, unknown>;
+};
+
+const STAGE_LABELS: Record<string, string> = {
+  research: "Generating research…",
+  solution: "Generating solution…",
+  briefing: "Generating briefing…",
+  email: "Generating email…",
+  refine: "Refining solution…",
+};
+
+/**
+ * Parse a fetch Response as JSON, tolerating non-JSON bodies. Long generations
+ * can hit a proxy/server timeout that returns an HTML error page; this surfaces
+ * a readable message instead of "Unexpected token '<'".
+ */
+async function parseJsonResponse(res: Response) {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    if (!res.ok) {
+      throw new Error(
+        `Server error (${res.status}${res.statusText ? ` ${res.statusText}` : ""})` +
+          " — the request may have timed out. Try generating tabs one at a time."
+      );
+    }
+    const snippet = text.slice(0, 120).replace(/\s+/g, " ").trim();
+    throw new Error(`Unexpected non-JSON response: ${snippet}`);
+  }
+}
 
 function CopyButton({ text }: { text: string }) {
   const [done, setDone] = React.useState(false);
@@ -106,12 +141,15 @@ function TabActions({
   present,
   type,
   busyLabel,
+  disabled,
   onGenerate,
   onEdit,
 }: {
   present: boolean;
   type: ArtifactType;
   busyLabel: string | null;
+  /** True while any generation is in flight (e.g. "Generate all"). */
+  disabled: boolean;
   onGenerate: (t: ArtifactType) => void;
   onEdit: () => void;
 }) {
@@ -130,13 +168,18 @@ function TabActions({
             <AutoAwesomeIcon />
           )
         }
-        disabled={busy}
+        disabled={busy || disabled}
         onClick={() => onGenerate(type)}
       >
         {busy ? busyLabel : present ? "Regenerate" : "Generate"}
       </Button>
       {present && (
-        <Button size="small" startIcon={<EditIcon />} disabled={busy} onClick={onEdit}>
+        <Button
+          size="small"
+          startIcon={<EditIcon />}
+          disabled={busy || disabled}
+          onClick={onEdit}
+        >
           Edit
         </Button>
       )}
@@ -228,6 +271,14 @@ export default function TaskDrawer({
   const [draftProblem, setDraftProblem] = React.useState("");
   const [draftPrimary, setDraftPrimary] = React.useState("");
   const [draftQuestions, setDraftQuestions] = React.useState<DiscoveryQuestion[]>([]);
+  // Email edit drafts (two templates, each subject + body).
+  const [draftFollowupSubject, setDraftFollowupSubject] = React.useState("");
+  const [draftFollowupText, setDraftFollowupText] = React.useState("");
+  const [draftDiscoverySubject, setDraftDiscoverySubject] = React.useState("");
+  const [draftDiscoveryText, setDraftDiscoveryText] = React.useState("");
+  // Refine inputs: one answer per discovery question (by index) + extra context.
+  const [draftAnswers, setDraftAnswers] = React.useState<string[]>([]);
+  const [draftComment, setDraftComment] = React.useState("");
 
   const open = Boolean(task);
   const title = task ? task.company || task.accountName || `Task ${task.id}` : "";
@@ -240,7 +291,7 @@ export default function TaskDrawer({
     setError(null);
     try {
       const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/artifacts`);
-      const body = await res.json();
+      const body = await parseJsonResponse(res);
       if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
       setData(body.artifacts as TaskArtifacts);
     } catch (e) {
@@ -263,30 +314,63 @@ export default function TaskDrawer({
     reload();
   }, [taskId, reload]);
 
-  const generate = async (type: ArtifactType | "all") => {
+  // Seed the refine inputs from the stored solution. Keyed on the solution's
+  // updated_at so it re-seeds after a (re)generate or refine, but never clobbers
+  // what the user is typing between those events.
+  React.useEffect(() => {
+    const sol = data?.solution;
+    const questions = (Array.isArray(sol?.discovery_questions) ? sol.discovery_questions : [])
+      .filter((q) => q && typeof q.question === "string");
+    const stored = new Map(
+      (Array.isArray(sol?.answers) ? sol.answers : [])
+        .filter((a) => a && typeof a.question === "string")
+        .map((a) => [a.question.trim(), a.answer ?? ""] as const)
+    );
+    setDraftAnswers(questions.map((q) => stored.get(q.question.trim()) ?? ""));
+    setDraftComment(sol?.additional_context ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId, data?.solution?.updated_at]);
+
+  // Run generation stages as short sequential requests (one LLM call each), so a
+  // long chain never trips the gateway timeout. UI refreshes after every stage and
+  // the chain stops on the first error.
+  const runChain = async (stages: GenStage[]) => {
     if (!taskId) return;
-    const labels: Record<string, string> = {
-      research: "Generating research…",
-      solution: "Generating solution…",
-      briefing: "Generating briefing…",
-      all: "Generating all…",
-    };
-    setBusy(labels[type]);
     setError(null);
     try {
-      const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type }),
-      });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
-      setData(body.artifacts as TaskArtifacts);
+      for (const stage of stages) {
+        setBusy(STAGE_LABELS[stage.type] ?? "Working…");
+        const res = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: stage.type, ...(stage.body ?? {}) }),
+        });
+        const body = await parseJsonResponse(res);
+        if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
+        setData(body.artifacts as TaskArtifacts);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
+  };
+
+  const generate = (type: ArtifactType | "all") =>
+    type === "all"
+      ? runChain([{ type: "research" }, { type: "solution" }, { type: "briefing" }, { type: "email" }])
+      : runChain([{ type }]);
+
+  // Refine: send the customer's answers + comment, then regenerate briefing + email.
+  const refine = () => {
+    const answers: DiscoveryAnswer[] = (data?.solution?.discovery_questions ?? []).map(
+      (q, i) => ({ question: q.question, answer: (draftAnswers[i] ?? "").trim() })
+    );
+    return runChain([
+      { type: "refine", body: { answers, comment: draftComment } },
+      { type: "briefing" },
+      { type: "email" },
+    ]);
   };
 
   const startEdit = (type: ArtifactType) => {
@@ -296,6 +380,12 @@ export default function TaskDrawer({
       setDraftProblem(data?.solution?.problem_understanding ?? "");
       setDraftPrimary(data?.solution?.primary_solution ?? "");
       setDraftQuestions(data?.solution?.discovery_questions ?? []);
+    }
+    if (type === "email") {
+      setDraftFollowupSubject(data?.email?.followup_subject ?? "");
+      setDraftFollowupText(data?.email?.followup_text ?? "");
+      setDraftDiscoverySubject(data?.email?.discovery_subject ?? "");
+      setDraftDiscoveryText(data?.email?.discovery_text ?? "");
     }
     setEditing(type);
   };
@@ -307,11 +397,18 @@ export default function TaskDrawer({
         ? { researchText: draftText }
         : editing === "briefing"
           ? { briefingText: draftText }
-          : {
-              problemUnderstanding: draftProblem,
-              primarySolution: draftPrimary,
-              discoveryQuestions: draftQuestions.filter((q) => q.question.trim()),
-            };
+          : editing === "email"
+            ? {
+                followupSubject: draftFollowupSubject,
+                followupText: draftFollowupText,
+                discoverySubject: draftDiscoverySubject,
+                discoveryText: draftDiscoveryText,
+              }
+            : {
+                problemUnderstanding: draftProblem,
+                primarySolution: draftPrimary,
+                discoveryQuestions: draftQuestions.filter((q) => q.question.trim()),
+              };
     setSaving(true);
     setError(null);
     try {
@@ -320,7 +417,7 @@ export default function TaskDrawer({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type: editing, fields }),
       });
-      const body = await res.json();
+      const body = await parseJsonResponse(res);
       if (!res.ok) throw new Error(body.error || `Failed (${res.status})`);
       setData(body.artifacts as TaskArtifacts);
       setEditing(null);
@@ -336,6 +433,7 @@ export default function TaskDrawer({
     Research: Boolean(data?.research),
     Solution: Boolean(data?.solution),
     Briefing: Boolean(data?.briefing),
+    Email: Boolean(data?.email),
   };
 
   return (
@@ -370,7 +468,7 @@ export default function TaskDrawer({
                 size="small"
                 variant="contained"
                 startIcon={
-                  busy === "Generating all…" ? (
+                  busy !== null ? (
                     <CircularProgress size={14} color="inherit" />
                   ) : (
                     <AutoAwesomeIcon />
@@ -379,7 +477,7 @@ export default function TaskDrawer({
                 disabled={busy !== null}
                 onClick={() => generate("all")}
               >
-                {busy === "Generating all…" ? "Generating…" : "Generate all"}
+                {busy ?? "Generate all"}
               </Button>
               <IconButton onClick={onClose} aria-label="Close">
                 <CloseIcon />
@@ -407,7 +505,7 @@ export default function TaskDrawer({
               <Box sx={{ flexGrow: 1 }} />
               {/* Pipeline strip */}
               <Stack direction="row" spacing={1.25} alignItems="center">
-                {(["Research", "Solution", "Briefing"] as const).map((k) => (
+                {(["Research", "Solution", "Briefing", "Email"] as const).map((k) => (
                   <Stack key={k} direction="row" spacing={0.5} alignItems="center">
                     <Box
                       sx={{
@@ -508,6 +606,7 @@ export default function TaskDrawer({
                 present={Boolean(data?.research?.research_text)}
                 type="research"
                 busyLabel={busy === "Generating research…" ? "Generating…" : null}
+                disabled={busy !== null}
                 onGenerate={generate}
                 onEdit={() => startEdit("research")}
               />
@@ -556,6 +655,7 @@ export default function TaskDrawer({
                 present={Boolean(data?.solution)}
                 type="solution"
                 busyLabel={busy === "Generating solution…" ? "Generating…" : null}
+                disabled={busy !== null}
                 onGenerate={generate}
                 onEdit={() => startEdit("solution")}
               />
@@ -676,7 +776,11 @@ export default function TaskDrawer({
                       <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
                         Discovery Questions
                       </Typography>
-                      <Stack spacing={1}>
+                      <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: "block" }}>
+                        Answer what the customer told you, add any extra context, then
+                        Refine to tailor the solution (briefing &amp; email regenerate too).
+                      </Typography>
+                      <Stack spacing={1.5}>
                         {data.solution.discovery_questions.map((q, i) => (
                           <Paper key={i} variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
                             <Typography variant="body2" sx={{ fontWeight: 500 }}>
@@ -687,8 +791,50 @@ export default function TaskDrawer({
                                 e.g. {q.example_answer}
                               </Typography>
                             )}
+                            <TextField
+                              fullWidth
+                              size="small"
+                              multiline
+                              label="Customer answer"
+                              value={draftAnswers[i] ?? ""}
+                              disabled={busy !== null}
+                              onChange={(e) =>
+                                setDraftAnswers((a) => {
+                                  const next = [...a];
+                                  next[i] = e.target.value;
+                                  return next;
+                                })
+                              }
+                              sx={{ mt: 1 }}
+                            />
                           </Paper>
                         ))}
+                        <TextField
+                          fullWidth
+                          size="small"
+                          multiline
+                          minRows={2}
+                          label="Comments / extra context"
+                          value={draftComment}
+                          disabled={busy !== null}
+                          onChange={(e) => setDraftComment(e.target.value)}
+                        />
+                        <Button
+                          variant="contained"
+                          size="small"
+                          startIcon={
+                            busy !== null ? (
+                              <CircularProgress size={14} color="inherit" />
+                            ) : (
+                              <AutoAwesomeIcon />
+                            )
+                          }
+                          disabled={busy !== null}
+                          onClick={refine}
+                          sx={{ alignSelf: "flex-start" }}
+                        >
+                          {busy ?? "Refine solution"}
+                        </Button>
                       </Stack>
                     </>
                   )}
@@ -718,6 +864,7 @@ export default function TaskDrawer({
                 present={Boolean(data?.briefing?.briefing_text)}
                 type="briefing"
                 busyLabel={busy === "Generating briefing…" ? "Generating…" : null}
+                disabled={busy !== null}
                 onGenerate={generate}
                 onEdit={() => startEdit("briefing")}
               />
@@ -756,9 +903,83 @@ export default function TaskDrawer({
               )}
             </TabPanel>
 
-            {/* Email (later slice) */}
+            {/* Email */}
             <TabPanel value={tab} index={4}>
-              <EmptyState message="Customer email — coming in a later step." />
+              <TabActions
+                present={Boolean(data?.email?.followup_text || data?.email?.discovery_text)}
+                type="email"
+                busyLabel={busy === "Generating email…" ? "Generating…" : null}
+                disabled={busy !== null}
+                onGenerate={generate}
+                onEdit={() => startEdit("email")}
+              />
+              {editing === "email" ? (
+                <Stack spacing={2}>
+                  <TextField
+                    fullWidth
+                    label="Follow-up subject"
+                    value={draftFollowupSubject}
+                    onChange={(e) => setDraftFollowupSubject(e.target.value)}
+                  />
+                  <TextField
+                    fullWidth
+                    multiline
+                    minRows={8}
+                    label="Follow-up email (Markdown)"
+                    value={draftFollowupText}
+                    onChange={(e) => setDraftFollowupText(e.target.value)}
+                  />
+                  <TextField
+                    fullWidth
+                    label="Discovery subject"
+                    value={draftDiscoverySubject}
+                    onChange={(e) => setDraftDiscoverySubject(e.target.value)}
+                  />
+                  <TextField
+                    fullWidth
+                    multiline
+                    minRows={8}
+                    label="Discovery email (Markdown)"
+                    value={draftDiscoveryText}
+                    onChange={(e) => setDraftDiscoveryText(e.target.value)}
+                  />
+                  <EditActions saving={saving} onSave={saveEdit} onCancel={() => setEditing(null)} />
+                </Stack>
+              ) : loading ? (
+                <LoadingBlock />
+              ) : data?.email && (data.email.followup_text || data.email.discovery_text) ? (
+                <>
+                  {data.emailStale && (
+                    <Alert severity="warning" sx={{ mb: 2 }}>
+                      The focal comment changed since these emails were generated — they
+                      may be out of date.
+                    </Alert>
+                  )}
+                  {data.email.followup_text && (
+                    <>
+                      <ArtifactHeader
+                        title={`Follow-up — ${data.email.followup_subject ?? ""}`}
+                        updatedAt={data.email.updated_at}
+                        edited={data.email.edited_by_user}
+                        copyText={`Subject: ${data.email.followup_subject ?? ""}\n\n${data.email.followup_text}`}
+                      />
+                      <Markdown>{data.email.followup_text}</Markdown>
+                    </>
+                  )}
+                  {data.email.discovery_text && (
+                    <>
+                      <Divider sx={{ my: 2 }} />
+                      <ArtifactHeader
+                        title={`Discovery questions — ${data.email.discovery_subject ?? ""}`}
+                        copyText={`Subject: ${data.email.discovery_subject ?? ""}\n\n${data.email.discovery_text}`}
+                      />
+                      <Markdown>{data.email.discovery_text}</Markdown>
+                    </>
+                  )}
+                </>
+              ) : (
+                <EmptyState message="No email yet — click Generate." />
+              )}
             </TabPanel>
 
             {/* History (later slice) */}

@@ -3,7 +3,7 @@
 // "EarlyStage") rather than the actual company — the real name is reliably in the
 // focal comment. Server-only (uses the LLM helpers).
 
-import { claudeComplete } from "@/lib/llm";
+import { geminiComplete } from "@/lib/llm";
 
 // Lowercased account_name values that are NOT real companies. Extend as needed.
 const PLACEHOLDER_ACCOUNTS = new Set([
@@ -51,7 +51,7 @@ export async function resolveCompanyName(
   }
 
   const answer = (
-    await claudeComplete({
+    await geminiComplete({
       system: RESOLVE_SYSTEM,
       user: `account_name: ${JSON.stringify(account)}\nfocal comment:\n${comment}`,
       maxTokens: 40,

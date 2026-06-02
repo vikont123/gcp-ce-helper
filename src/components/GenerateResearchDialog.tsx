@@ -146,7 +146,7 @@ export default function GenerateResearchDialog({
         <DialogTitle>
           Generate company research
           <Typography variant="body2" color="text.secondary">
-            Runs grounded research (Gemini → Claude) for every company and saves
+            Runs grounded research (Gemini) for every company and saves
             it. Existing rows are refreshed; ones you edited are kept.
           </Typography>
         </DialogTitle>

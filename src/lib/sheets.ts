@@ -33,11 +33,33 @@ function columnLetter(index: number): string {
   return letter;
 }
 
+// Short-lived in-memory cache for the full sheet. Every artifact/board/generate
+// request used to re-fetch the entire tab over the network; opening a few tasks
+// in a row meant several full reads. The sheet only changes via updateTaskFields
+// (below), which clears this — so a small TTL is safe and cuts a network
+// round-trip off the hot path. Per server instance; not shared across instances.
+const SHEET_CACHE_TTL_MS = Number(process.env.SHEET_CACHE_TTL_MS ?? 15_000);
+let _rowsCache: { rows: string[][]; at: number } | null = null;
+
+/** Drop the cached sheet rows so the next read re-fetches (called after writes). */
+export function invalidateSheetCache(): void {
+  _rowsCache = null;
+}
+
 /**
  * Read the full DBTask tab as a 2D array of strings (row 0 = headers).
- * Throws on auth/permission errors; callers turn that into a friendly API response.
+ * Served from a short TTL cache unless `force` is set. Throws on auth/permission
+ * errors; callers turn that into a friendly API response.
  */
-export async function readSheetRows(): Promise<string[][]> {
+export async function readSheetRows(opts?: { force?: boolean }): Promise<string[][]> {
+  if (
+    !opts?.force &&
+    _rowsCache &&
+    Date.now() - _rowsCache.at < SHEET_CACHE_TTL_MS
+  ) {
+    return _rowsCache.rows;
+  }
+
   const spreadsheetId = requireSpreadsheetId();
   const tab = process.env.SHEET_TAB || "DBTask";
 
@@ -48,7 +70,9 @@ export async function readSheetRows(): Promise<string[][]> {
     valueRenderOption: "FORMATTED_VALUE",
   });
 
-  return (res.data.values as string[][]) ?? [];
+  const rows = (res.data.values as string[][]) ?? [];
+  _rowsCache = { rows, at: Date.now() };
+  return rows;
 }
 
 /** Sheet-header name for each writable Task field. */
@@ -120,4 +144,7 @@ export async function updateTaskFields(
       })),
     },
   });
+
+  // The cached rows are now stale — force the next read to re-fetch.
+  invalidateSheetCache();
 }

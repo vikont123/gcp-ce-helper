@@ -1,10 +1,10 @@
 // Company-research agent. Two-stage, server-only:
-//   1. Gemini + Google Search grounding gathers current, real facts.
-//   2. Claude rewrites them into the established research_text format.
-// The Claude voice keeps research consistent with the (later) solution/briefing
-// agents; the Gemini stage is what keeps the facts real rather than hallucinated.
+//   1. Gemini (MODEL_FLASH) + Google Search grounding gathers current, real facts.
+//   2. Gemini (MODEL_PRO) rewrites them into the established research_text format.
+// The MODEL_PRO voice keeps research consistent with the (later) solution/briefing
+// agents; the grounding stage is what keeps the facts real rather than hallucinated.
 
-import { claudeComplete, geminiGrounded } from "@/lib/llm";
+import { geminiComplete, geminiGrounded } from "@/lib/llm";
 
 export interface ResearchResult {
   researchText: string;
@@ -55,7 +55,7 @@ export async function generateResearch(
   context?: string
 ): Promise<ResearchResult> {
   const { text: facts, sources } = await geminiGrounded(factPrompt(company, context));
-  const researchText = await claudeComplete({
+  const researchText = await geminiComplete({
     system: FORMAT_SYSTEM,
     user: formatPrompt(company, facts, context),
     maxTokens: 2500,

@@ -1,54 +1,42 @@
-// Server-only LLM access via Vertex AI. Never import from a client component —
-// it authenticates with the same ADC service account as src/lib/sheets.ts and
-// src/lib/bigquery.ts (GOOGLE_APPLICATION_CREDENTIALS).
+// Server-only LLM access. Never import from a client component. Uses the Gemini
+// Developer API (generativelanguage.googleapis.com) authenticated with
+// GOOGLE_API_KEY — the `-latest` model aliases below are Developer-API names and
+// do not exist on Vertex AI.
 //
-// Two backends, one Vertex project:
-//   - Claude (Anthropic on Vertex) — writing/formatting, our house voice.
-//   - Gemini (Google on Vertex) — fact-gathering with Google Search grounding,
-//     which Claude on Vertex cannot do natively.
+// One backend, driven by the two models configured in .env.local:
+//   - MODEL_PRO   — writing/formatting, our house voice.
+//   - MODEL_FLASH — fact-gathering with Google Search grounding.
 
-import { AnthropicVertex } from "@anthropic-ai/vertex-sdk";
 import { GoogleGenAI } from "@google/genai";
 
-const PROJECT = process.env.ANTHROPIC_VERTEX_PROJECT_ID || "mytestingenv-355509";
-const CLAUDE_REGION = process.env.CLOUD_ML_REGION || "global";
-const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL || "claude-opus-4-8";
-// Gemini grounding is verified working on the `global` endpoint; allow an
-// override in case a future model needs a regional one. gemini-2.0-flash is not
-// enabled in this project — 2.5-flash is.
-const GEMINI_LOCATION = process.env.GEMINI_LOCATION || CLAUDE_REGION;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-
-let _claude: AnthropicVertex | null = null;
-function claude(): AnthropicVertex {
-  if (!_claude) _claude = new AnthropicVertex({ region: CLAUDE_REGION, projectId: PROJECT });
-  return _claude;
-}
+const API_KEY = process.env.GOOGLE_API_KEY;
+const MODEL_PRO = process.env.MODEL_PRO || "gemini-pro-latest";
+const MODEL_FLASH = process.env.MODEL_FLASH || "gemini-flash-latest";
 
 let _gemini: GoogleGenAI | null = null;
 function gemini(): GoogleGenAI {
   if (!_gemini) {
-    _gemini = new GoogleGenAI({ vertexai: true, project: PROJECT, location: GEMINI_LOCATION });
+    if (!API_KEY) throw new Error("GOOGLE_API_KEY is not set");
+    _gemini = new GoogleGenAI({ apiKey: API_KEY });
   }
   return _gemini;
 }
 
-/** A single Claude completion. Returns the concatenated text blocks. */
-export async function claudeComplete(args: {
+/** A single Gemini (MODEL_PRO) completion. Returns the response text. */
+export async function geminiComplete(args: {
   system?: string;
   user: string;
   maxTokens?: number;
 }): Promise<string> {
-  const msg = await claude().messages.create({
-    model: CLAUDE_MODEL,
-    max_tokens: args.maxTokens ?? 4096,
-    ...(args.system ? { system: args.system } : {}),
-    messages: [{ role: "user", content: args.user }],
+  const r = await gemini().models.generateContent({
+    model: MODEL_PRO,
+    contents: args.user,
+    config: {
+      ...(args.system ? { systemInstruction: args.system } : {}),
+      maxOutputTokens: args.maxTokens ?? 4096,
+    },
   });
-  return msg.content
-    .map((b) => (b.type === "text" ? b.text : ""))
-    .join("")
-    .trim();
+  return (r.text ?? "").trim();
 }
 
 export interface GroundedResult {
@@ -61,7 +49,7 @@ export interface GroundedResult {
 /** Gemini call with Google Search grounding. Used for live company facts. */
 export async function geminiGrounded(prompt: string): Promise<GroundedResult> {
   const r = await gemini().models.generateContent({
-    model: GEMINI_MODEL,
+    model: MODEL_FLASH,
     contents: prompt,
     config: { tools: [{ googleSearch: {} }] },
   });
