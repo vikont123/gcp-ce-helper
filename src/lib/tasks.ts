@@ -15,6 +15,13 @@ export const COLUMN_LABELS: Record<ColumnId, string> = {
 
 /** A single task, mapped from one row of the DBTask sheet (header-keyed). */
 export interface Task {
+  /**
+   * Stable per-row unique key. The sheet's `ID` column is NOT unique (~half the
+   * rows share an ID), so it can't be used as a React key or dnd id — duplicate
+   * keys break list reconciliation (filtered cards don't update) and drag-drop.
+   * Derived from the row position at load; never written back to the sheet.
+   */
+  uid: string;
   id: string;
   created: string;
   lastUpdate: string;
@@ -122,8 +129,9 @@ export function rowsToTasks(rows: string[][]): Task[] {
   if (!rows || rows.length < 2) return [];
   const headers = rows[0].map((h) => (h ?? "").trim());
 
-  return rows.slice(1).map((row) => {
+  return rows.slice(1).map((row, index) => {
     const task: Task = {
+      uid: `row-${index}`,
       id: "",
       created: "",
       lastUpdate: "",
@@ -162,4 +170,30 @@ export function filterTasks(tasks: Task[], ceName: string): Task[] {
   return tasks.filter(
     (t) => (t.id || t.accountName) && matchesCE(t, ceName)
   );
+}
+
+/**
+ * Is this task assigned to `ceName` on the primary "CE Assigned" column?
+ * Stricter than {@link matchesCE} (which also matches the manager column) so the
+ * header picker shows only the cards that CE actually owns — not ones where they
+ * merely appear as manager. Empty `ceName` matches everything ("All CEs").
+ */
+export function isAssignedToCE(task: Task, ceName: string): boolean {
+  const needle = (ceName ?? "").trim().toLowerCase();
+  if (!needle) return true;
+  return (task.ceAssigned ?? "").trim().toLowerCase() === needle;
+}
+
+/**
+ * Distinct CE names found on the tasks (from the "CE Assigned" column), sorted
+ * alphabetically. Drives the CE picker in the header so the user can switch
+ * which CE's board they are looking at.
+ */
+export function listCEs(tasks: Task[]): string[] {
+  const set = new Set<string>();
+  for (const t of tasks) {
+    const name = (t.ceAssigned ?? "").trim();
+    if (name) set.add(name);
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
 }

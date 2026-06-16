@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { SessionProvider } from "next-auth/react";
 import ThemeRegistry from "@/components/ThemeRegistry";
 import { roboto } from "@/theme";
 
@@ -22,7 +23,9 @@ export default function RootLayout({
         />
       </head>
       <body>
-        <ThemeRegistry>{children}</ThemeRegistry>
+        <SessionProvider>
+          <ThemeRegistry>{children}</ThemeRegistry>
+        </SessionProvider>
       </body>
     </html>
   );

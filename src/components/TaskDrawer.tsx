@@ -436,6 +436,11 @@ export default function TaskDrawer({
     Email: Boolean(data?.email),
   };
 
+  // Block every generate/refine/edit action until the cache lookup finishes —
+  // the first open can take ~30s (BigQuery cold start) and clicking Generate
+  // before we know what already exists would needlessly re-run the pipeline.
+  const actionsDisabled = busy !== null || loading;
+
   return (
     <Drawer
       anchor="right"
@@ -468,16 +473,16 @@ export default function TaskDrawer({
                 size="small"
                 variant="contained"
                 startIcon={
-                  busy !== null ? (
+                  actionsDisabled ? (
                     <CircularProgress size={14} color="inherit" />
                   ) : (
                     <AutoAwesomeIcon />
                   )
                 }
-                disabled={busy !== null}
+                disabled={actionsDisabled}
                 onClick={() => generate("all")}
               >
-                {busy ?? "Generate all"}
+                {busy ?? (loading ? "Checking…" : "Generate all")}
               </Button>
               <IconButton onClick={onClose} aria-label="Close">
                 <CloseIcon />
@@ -552,6 +557,17 @@ export default function TaskDrawer({
               </Alert>
             )}
 
+            {loading && (
+              <Alert
+                severity="info"
+                icon={<CircularProgress size={18} />}
+                sx={{ mt: 2 }}
+              >
+                Checking BigQuery for saved materials for this company — this can
+                take up to ~30s on first open. Please wait…
+              </Alert>
+            )}
+
             {/* Overview */}
             <TabPanel value={tab} index={0}>
               <Box
@@ -606,7 +622,7 @@ export default function TaskDrawer({
                 present={Boolean(data?.research?.research_text)}
                 type="research"
                 busyLabel={busy === "Generating research…" ? "Generating…" : null}
-                disabled={busy !== null}
+                disabled={actionsDisabled}
                 onGenerate={generate}
                 onEdit={() => startEdit("research")}
               />
@@ -645,7 +661,10 @@ export default function TaskDrawer({
                   )}
                 </>
               ) : (
-                <EmptyState message="No research yet — click Generate." />
+                <EmptyState
+                  message="We don't have any research saved for this company yet."
+                  hint="Click Generate and we'll look it up and fill it in."
+                />
               )}
             </TabPanel>
 
@@ -655,7 +674,7 @@ export default function TaskDrawer({
                 present={Boolean(data?.solution)}
                 type="solution"
                 busyLabel={busy === "Generating solution…" ? "Generating…" : null}
-                disabled={busy !== null}
+                disabled={actionsDisabled}
                 onGenerate={generate}
                 onEdit={() => startEdit("solution")}
               />
@@ -797,7 +816,7 @@ export default function TaskDrawer({
                               multiline
                               label="Customer answer"
                               value={draftAnswers[i] ?? ""}
-                              disabled={busy !== null}
+                              disabled={actionsDisabled}
                               onChange={(e) =>
                                 setDraftAnswers((a) => {
                                   const next = [...a];
@@ -816,7 +835,7 @@ export default function TaskDrawer({
                           minRows={2}
                           label="Comments / extra context"
                           value={draftComment}
-                          disabled={busy !== null}
+                          disabled={actionsDisabled}
                           onChange={(e) => setDraftComment(e.target.value)}
                         />
                         <Button
@@ -829,7 +848,7 @@ export default function TaskDrawer({
                               <AutoAwesomeIcon />
                             )
                           }
-                          disabled={busy !== null}
+                          disabled={actionsDisabled}
                           onClick={refine}
                           sx={{ alignSelf: "flex-start" }}
                         >
@@ -854,7 +873,10 @@ export default function TaskDrawer({
                   )}
                 </>
               ) : (
-                <EmptyState message="No solution yet — click Generate." />
+                <EmptyState
+                  message="No solution yet for this company."
+                  hint="Click Generate to draft a problem statement, solution and discovery questions."
+                />
               )}
             </TabPanel>
 
@@ -864,7 +886,7 @@ export default function TaskDrawer({
                 present={Boolean(data?.briefing?.briefing_text)}
                 type="briefing"
                 busyLabel={busy === "Generating briefing…" ? "Generating…" : null}
-                disabled={busy !== null}
+                disabled={actionsDisabled}
                 onGenerate={generate}
                 onEdit={() => startEdit("briefing")}
               />
@@ -899,7 +921,10 @@ export default function TaskDrawer({
                   <Markdown>{data.briefing.briefing_text}</Markdown>
                 </>
               ) : (
-                <EmptyState message="No briefing yet — click Generate." />
+                <EmptyState
+                  message="No meeting briefing yet for this company."
+                  hint="Click Generate to prepare one for your meeting."
+                />
               )}
             </TabPanel>
 
@@ -909,7 +934,7 @@ export default function TaskDrawer({
                 present={Boolean(data?.email?.followup_text || data?.email?.discovery_text)}
                 type="email"
                 busyLabel={busy === "Generating email…" ? "Generating…" : null}
-                disabled={busy !== null}
+                disabled={actionsDisabled}
                 onGenerate={generate}
                 onEdit={() => startEdit("email")}
               />
@@ -978,7 +1003,10 @@ export default function TaskDrawer({
                   )}
                 </>
               ) : (
-                <EmptyState message="No email yet — click Generate." />
+                <EmptyState
+                  message="No emails yet for this company."
+                  hint="Click Generate to draft follow-up and discovery emails."
+                />
               )}
             </TabPanel>
 

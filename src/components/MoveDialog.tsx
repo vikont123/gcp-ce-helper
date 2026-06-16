@@ -22,10 +22,20 @@ export interface MoveRequest {
   column: ColumnId;
 }
 
+/** Local YYYY-MM-DD date stamp used to tag each CE Comment entry. */
+function todayStamp(): string {
+  const d = new Date();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+
 /**
  * Confirmation dialog shown when a card is dragged into In Work / Completed:
- * pick the exact status and optionally log a CE Comment (work note). Cancelling
- * leaves the card where it was.
+ * pick the exact status and log a mandatory CE Comment (work note). The note is
+ * prefixed with the destination column + date — e.g. "(in work(2026-07-09)) …;"
+ * — and appended to the existing history (we never overwrite prior notes).
+ * Cancelling leaves the card where it was.
  */
 export default function MoveDialog({
   request,
@@ -41,14 +51,31 @@ export default function MoveDialog({
 
   const [status, setStatus] = React.useState(options[0]);
   const [comment, setComment] = React.useState("");
+  const [touched, setTouched] = React.useState(false);
 
-  // Reset the form each time a new move is requested.
+  // Reset the form each time a new move is requested. The comment field holds a
+  // NEW note only — prior history is shown read-only below, never edited here.
   React.useEffect(() => {
     if (request) {
       setStatus(STATUS_OPTIONS[request.column][0]);
-      setComment(request.task.ceComments ?? "");
+      setComment("");
+      setTouched(false);
     }
   }, [request]);
+
+  const history = request?.task.ceComments?.trim() ?? "";
+  const empty = comment.trim() === "";
+
+  const handleConfirm = () => {
+    if (empty) {
+      setTouched(true);
+      return;
+    }
+    // (<destination>(<date>)) <note>;  appended to the existing history.
+    const entry = `(${COLUMN_LABELS[column].toLowerCase()}(${todayStamp()})) ${comment.trim()};`;
+    const combined = history ? `${history} ${entry}` : entry;
+    onConfirm(status, combined);
+  };
 
   return (
     <Dialog
@@ -84,10 +111,31 @@ export default function MoveDialog({
                 ))}
               </TextField>
 
+              {history && (
+                <TextField
+                  label="Previous notes"
+                  value={history}
+                  fullWidth
+                  multiline
+                  maxRows={4}
+                  size="small"
+                  InputProps={{ readOnly: true }}
+                  sx={{ "& textarea": { color: "text.secondary" } }}
+                />
+              )}
+
               <TextField
                 label="CE Comment (work done)"
                 value={comment}
                 onChange={(e) => setComment(e.target.value)}
+                onBlur={() => setTouched(true)}
+                required
+                error={touched && empty}
+                helperText={
+                  touched && empty
+                    ? "A comment is required to move this card."
+                    : `Tagged as “(${COLUMN_LABELS[column].toLowerCase()}(${todayStamp()})) …;” and added to the history.`
+                }
                 fullWidth
                 multiline
                 minRows={3}
@@ -100,10 +148,7 @@ export default function MoveDialog({
             <Button onClick={onCancel} color="inherit">
               Cancel
             </Button>
-            <Button
-              variant="contained"
-              onClick={() => onConfirm(status, comment)}
-            >
+            <Button variant="contained" disabled={empty} onClick={handleConfirm}>
               Move
             </Button>
           </DialogActions>

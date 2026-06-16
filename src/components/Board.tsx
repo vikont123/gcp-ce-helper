@@ -16,6 +16,7 @@ import {
   type DragStartEvent,
   type DragEndEvent,
 } from "@dnd-kit/core";
+import { useSession } from "next-auth/react";
 import AppHeader from "@/components/AppHeader";
 import Column from "@/components/Column";
 import TaskCard from "@/components/TaskCard";
@@ -24,19 +25,34 @@ import MoveDialog, { type MoveRequest } from "@/components/MoveDialog";
 import {
   COLUMN_ORDER,
   statusForColumn,
+  listCEs,
+  isAssignedToCE,
   type ColumnId,
   type Task,
 } from "@/lib/tasks";
 
 interface TasksResponse {
   tasks?: Task[];
-  ceName?: string;
   error?: string;
 }
 
+/** Pick the CE entry that matches the signed-in user's name, else "" (= All). */
+function defaultCEFor(userName: string, ces: string[]): string {
+  const name = userName.trim().toLowerCase();
+  if (!name) return "";
+  const exact = ces.find((c) => c.toLowerCase() === name);
+  if (exact) return exact;
+  // Loose match so "Michael Gadaev" still finds "Michael Gadaev (CE)" etc.
+  const loose = ces.find(
+    (c) => c.toLowerCase().includes(name) || name.includes(c.toLowerCase())
+  );
+  return loose ?? "";
+}
+
 export default function Board() {
+  const { data: session, status } = useSession();
   const [tasks, setTasks] = React.useState<Task[]>([]);
-  const [ceName, setCeName] = React.useState("Michael Gadaev");
+  const [ce, setCe] = React.useState(""); // "" = all CEs
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [query, setQuery] = React.useState("");
@@ -44,6 +60,7 @@ export default function Board() {
   const [activeTask, setActiveTask] = React.useState<Task | null>(null);
   const [moveRequest, setMoveRequest] = React.useState<MoveRequest | null>(null);
   const [snack, setSnack] = React.useState<string | null>(null);
+  const defaultedRef = React.useRef(false);
 
   // A small drag threshold so a normal click still opens the task detail.
   const sensors = useSensors(
@@ -60,7 +77,6 @@ export default function Board() {
         throw new Error(data.error || `Request failed (${res.status})`);
       }
       setTasks(data.tasks ?? []);
-      if (data.ceName) setCeName(data.ceName);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setTasks([]);
@@ -73,6 +89,19 @@ export default function Board() {
     load();
   }, [load]);
 
+  // Distinct CEs found on the board, for the header picker.
+  const ces = React.useMemo(() => listCEs(tasks), [tasks]);
+
+  // Once tasks and the session have resolved, default the picker to the CE that
+  // matches the signed-in user. No match (or no name) → show all CEs. Applied
+  // once; after that the user's manual choice wins.
+  React.useEffect(() => {
+    if (defaultedRef.current) return;
+    if (status === "loading" || ces.length === 0) return;
+    setCe(defaultCEFor(session?.user?.name ?? "", ces));
+    defaultedRef.current = true;
+  }, [status, session, ces]);
+
   // Optimistically move a task, then persist; revert and warn on failure.
   const moveTask = React.useCallback(
     async (
@@ -84,7 +113,7 @@ export default function Board() {
       const snapshot = tasks;
       setTasks((ts) =>
         ts.map((t) =>
-          t.id === task.id
+          t.uid === task.uid
             ? {
                 ...t,
                 column,
@@ -138,11 +167,13 @@ export default function Board() {
     }
   };
 
-  // Client-side search across the most useful free-text fields.
+  // Filter by the selected CE first, then client-side search across the most
+  // useful free-text fields.
   const filtered = React.useMemo(() => {
+    const byCe = ce ? tasks.filter((t) => isAssignedToCE(t, ce)) : tasks;
     const q = query.trim().toLowerCase();
-    if (!q) return tasks;
-    return tasks.filter((t) =>
+    if (!q) return byCe;
+    return byCe.filter((t) =>
       [
         t.accountName,
         t.fsr,
@@ -157,7 +188,7 @@ export default function Board() {
         .toLowerCase()
         .includes(q)
     );
-  }, [tasks, query]);
+  }, [tasks, query, ce]);
 
   const byColumn = React.useMemo(() => {
     const map: Record<ColumnId, Task[]> = {
@@ -179,12 +210,13 @@ export default function Board() {
       }}
     >
       <AppHeader
-        ceName={ceName}
+        ces={ces}
+        ce={ce}
+        onCeChange={setCe}
         query={query}
         onQueryChange={setQuery}
         onRefresh={load}
         refreshing={loading}
-        onResearchComplete={load}
       />
 
       <Box sx={{ flex: 1, minHeight: 0, p: 2 }}>
@@ -214,6 +246,11 @@ export default function Board() {
                 height: "100%",
                 overflowX: "auto",
                 alignItems: "stretch",
+                // Keep the columns as a centered block so wide screens don't
+                // leave the whole right half empty.
+                width: "100%",
+                maxWidth: 1600,
+                mx: "auto",
               }}
             >
               {COLUMN_ORDER.map((columnId) => (

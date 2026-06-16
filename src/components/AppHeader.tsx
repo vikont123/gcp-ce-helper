@@ -1,5 +1,6 @@
 "use client";
 
+import * as React from "react";
 import AppBar from "@mui/material/AppBar";
 import Toolbar from "@mui/material/Toolbar";
 import Box from "@mui/material/Box";
@@ -8,27 +9,40 @@ import InputBase from "@mui/material/InputBase";
 import IconButton from "@mui/material/IconButton";
 import Tooltip from "@mui/material/Tooltip";
 import Avatar from "@mui/material/Avatar";
-import Chip from "@mui/material/Chip";
+import Select from "@mui/material/Select";
+import FormControl from "@mui/material/FormControl";
+import InputLabel from "@mui/material/InputLabel";
+import Menu from "@mui/material/Menu";
+import MenuItem from "@mui/material/MenuItem";
+import ListItemIcon from "@mui/material/ListItemIcon";
+import Divider from "@mui/material/Divider";
+import LogoutIcon from "@mui/icons-material/Logout";
 import SearchIcon from "@mui/icons-material/Search";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import ViewKanbanOutlinedIcon from "@mui/icons-material/ViewKanbanOutlined";
-import GenerateResearchDialog from "@/components/GenerateResearchDialog";
+import { useSession, signOut } from "next-auth/react";
 
 export default function AppHeader({
-  ceName,
+  ces,
+  ce,
+  onCeChange,
   query,
   onQueryChange,
   onRefresh,
   refreshing,
-  onResearchComplete,
 }: {
-  ceName: string;
+  ces: string[];
+  ce: string;
+  onCeChange: (ce: string) => void;
   query: string;
   onQueryChange: (q: string) => void;
   onRefresh: () => void;
   refreshing: boolean;
-  onResearchComplete?: () => void;
 }) {
+  const { data: session } = useSession();
+  const user = session?.user;
+  const [anchorEl, setAnchorEl] = React.useState<null | HTMLElement>(null);
+
   return (
     <AppBar position="sticky">
       <Toolbar sx={{ gap: 2 }}>
@@ -67,16 +81,28 @@ export default function AppHeader({
 
         <Box sx={{ flexGrow: 1, display: { xs: "none", md: "block" } }} />
 
-        {/* Active CE filter */}
-        <Tooltip title="Active CE filter">
-          <Chip
-            label={ceName}
-            size="small"
-            sx={{ display: { xs: "none", sm: "flex" } }}
-          />
-        </Tooltip>
-
-        <GenerateResearchDialog onComplete={onResearchComplete} />
+        {/* CE filter — switch which CE's board is shown */}
+        <FormControl
+          size="small"
+          sx={{ minWidth: 180, display: { xs: "none", sm: "flex" } }}
+        >
+          <InputLabel id="ce-filter-label">CE</InputLabel>
+          <Select
+            labelId="ce-filter-label"
+            label="CE"
+            value={ce}
+            onChange={(e) => onCeChange(e.target.value)}
+          >
+            <MenuItem value="">
+              <em>All CEs</em>
+            </MenuItem>
+            {ces.map((name) => (
+              <MenuItem key={name} value={name}>
+                {name}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
 
         <Tooltip title="Refresh">
           <span>
@@ -94,9 +120,51 @@ export default function AppHeader({
           </span>
         </Tooltip>
 
-        <Avatar sx={{ width: 32, height: 32, bgcolor: "primary.main" }}>
-          {ceName ? ceName[0] : "?"}
-        </Avatar>
+        {/* Signed-in user: avatar opens a menu with Sign out */}
+        <Tooltip title={user?.email ?? "Account"}>
+          <IconButton
+            onClick={(e) => setAnchorEl(e.currentTarget)}
+            sx={{ p: 0.5 }}
+            aria-label="account menu"
+          >
+            <Avatar
+              src={user?.image ?? undefined}
+              sx={{ width: 32, height: 32, bgcolor: "primary.main" }}
+            >
+              {(user?.name ?? "?")[0]}
+            </Avatar>
+          </IconButton>
+        </Tooltip>
+        <Menu
+          anchorEl={anchorEl}
+          open={Boolean(anchorEl)}
+          onClose={() => setAnchorEl(null)}
+          anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+          transformOrigin={{ vertical: "top", horizontal: "right" }}
+        >
+          {user && (
+            <Box sx={{ px: 2, py: 1 }}>
+              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                {user.name}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                {user.email}
+              </Typography>
+            </Box>
+          )}
+          {user && <Divider />}
+          <MenuItem
+            onClick={() => {
+              setAnchorEl(null);
+              signOut({ callbackUrl: "/login" });
+            }}
+          >
+            <ListItemIcon>
+              <LogoutIcon fontSize="small" />
+            </ListItemIcon>
+            Sign out
+          </MenuItem>
+        </Menu>
       </Toolbar>
     </AppBar>
   );

@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import Box from "@mui/material/Box";
 import Link from "@mui/material/Link";
 import Typography from "@mui/material/Typography";
+import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 
 /**
  * Renders agent output (markdown) with Material-friendly styling. Links open in
@@ -70,12 +71,18 @@ export default function Markdown({ children }: { children: string }) {
 }
 
 /** Centered placeholder for empty / not-yet-generated tabs. */
-export function EmptyState({ message }: { message: string }) {
+export function EmptyState({ message, hint }: { message: string; hint?: string }) {
   return (
     <Box sx={{ py: 6, textAlign: "center" }}>
+      <AutoAwesomeIcon sx={{ color: "text.disabled", fontSize: 40, mb: 1 }} />
       <Typography variant="body2" color="text.secondary">
         {message}
       </Typography>
+      {hint && (
+        <Typography variant="caption" color="text.disabled" sx={{ mt: 0.5, display: "block" }}>
+          {hint}
+        </Typography>
+      )}
     </Box>
   );
 }

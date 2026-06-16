@@ -19,7 +19,7 @@ function DraggableTaskCard({
   onOpen: (task: Task) => void;
 }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
-    id: task.id,
+    id: task.uid,
     data: { task },
     disabled: !task.id,
   });
@@ -60,7 +60,7 @@ export default function Column({
       sx={{
         flex: 1,
         minWidth: 300,
-        maxWidth: 420,
+        maxWidth: 520,
         display: "flex",
         flexDirection: "column",
         bgcolor: "background.default",
@@ -129,7 +129,7 @@ export default function Column({
             ))
           : tasks.map((task) => (
               <DraggableTaskCard
-                key={task.id || task.accountName}
+                key={task.uid}
                 task={task}
                 onOpen={onOpen}
               />
