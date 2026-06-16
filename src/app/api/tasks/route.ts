@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readSheetRows, updateTaskFields } from "@/lib/sheets";
-import { getResolutionMap } from "@/lib/bigquery";
+import { getResolutionMap, upsertCompanyResolution } from "@/lib/bigquery";
+import { isPlaceholderAccount, resolveCompanyName } from "@/lib/company";
 import {
   rowsToTasks,
   filterTasks,
@@ -22,11 +23,11 @@ function isPermissionError(message: string): boolean {
 }
 
 export async function GET() {
-  const ceName = process.env.CE_FILTER_NAME || "Michael Gadaev";
-
   try {
     const rows = await readSheetRows();
-    const tasks = filterTasks(rowsToTasks(rows), ceName);
+    // Return every CE's tasks (passing "" disables the CE filter, keeps the
+    // blank-row drop). The client picks which CE to show in the header.
+    const tasks = filterTasks(rowsToTasks(rows), "");
 
     // Overlay resolved real company names where account_name was a placeholder.
     // A missing map (e.g. table not created yet) must not break the board.
@@ -35,11 +36,39 @@ export async function GET() {
       for (const t of tasks) {
         if (resolved[t.id]) t.company = resolved[t.id];
       }
+
+      // Resolve any placeholder account that hasn't been recorded yet, so the
+      // board never shows "NotinList" for tasks whose research wasn't generated.
+      // Resolutions are persisted, so the LLM runs at most once per task.
+      const unresolved = tasks.filter(
+        (t) => t.id && !resolved[t.id] && isPlaceholderAccount(t.accountName)
+      );
+      await Promise.all(
+        unresolved.map(async (t) => {
+          try {
+            const { company, usedFallback } = await resolveCompanyName(
+              t.accountName || "",
+              t.comment || ""
+            );
+            if (usedFallback && company) {
+              t.company = company;
+              await upsertCompanyResolution({
+                taskId: t.id,
+                accountName: t.accountName || "",
+                company,
+                usedFallback,
+              });
+            }
+          } catch {
+            /* per-task best-effort; leave account_name as the display name */
+          }
+        })
+      );
     } catch {
       /* resolution is best-effort; fall back to account_name */
     }
 
-    return NextResponse.json({ tasks, ceName });
+    return NextResponse.json({ tasks });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     const isPermission = isPermissionError(message);
