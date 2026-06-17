@@ -9,6 +9,7 @@ import {
   updateSolutionFields,
   updateBriefingText,
   updateEmailFields,
+  updateInsightText,
   type DiscoveryQuestion,
 } from "@/lib/bigquery";
 
@@ -90,6 +91,8 @@ export async function PATCH(
 
     if (type === "research") {
       await updateResearchText(company, String(fields.researchText ?? ""));
+    } else if (type === "insight") {
+      await updateInsightText(company, String(fields.insightText ?? ""));
     } else if (type === "solution") {
       await updateSolutionFields({
         taskId: id,

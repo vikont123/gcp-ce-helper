@@ -89,6 +89,15 @@ export interface BillingArtifact {
   updated_at: string | null;
 }
 
+/** Account-level insight across all of a company's tasks. Company-keyed. */
+export interface InsightArtifact {
+  company_name: string;
+  insight_text: string | null;
+  tasks_hash: string | null;
+  edited_by_user: boolean | null;
+  updated_at: string | null;
+}
+
 /** Two customer-facing email templates (follow-up + discovery), keyed per task. */
 export interface EmailArtifact {
   task_id: string;
@@ -111,6 +120,7 @@ export interface TaskArtifacts {
   briefing: BriefingArtifact | null;
   billing: BillingArtifact | null;
   email: EmailArtifact | null;
+  insight: InsightArtifact | null;
   /** A solution exists for this task but under a different (older) focal_hash. */
   solutionStale: boolean;
   briefingStale: boolean;
@@ -231,6 +241,80 @@ export async function updateResearchText(
       WHERE LOWER(TRIM(company_name)) = LOWER(TRIM(@company))`,
     params: { company, researchText },
     types: { company: "STRING", researchText: "STRING" },
+  });
+}
+
+// ---- Insight reads/writes (company-keyed, like research) ------------------
+// insight_cache is created upfront (not lazily); reads stay missing-table-safe.
+
+export async function getInsight(
+  company: string
+): Promise<InsightArtifact | null> {
+  if (!company?.trim()) return null;
+  try {
+    const rows = await queryRows<Record<string, unknown>>(
+      `SELECT company_name, insight_text, tasks_hash, edited_by_user, updated_at
+       FROM ${ds("insight_cache")}
+       WHERE LOWER(TRIM(company_name)) = LOWER(TRIM(@company))
+       ORDER BY updated_at DESC LIMIT 1`,
+      { company }
+    );
+    const r = rows[0];
+    if (!r) return null;
+    return {
+      company_name: String(r.company_name ?? company),
+      insight_text: (r.insight_text as string) ?? null,
+      tasks_hash: (r.tasks_hash as string) ?? null,
+      edited_by_user: (r.edited_by_user as boolean) ?? null,
+      updated_at: tsString(r.updated_at),
+    };
+  } catch (err) {
+    if (isMissingTable(err)) return null;
+    throw err;
+  }
+}
+
+/**
+ * Upsert a generated insight by company name. Never overwrites a row a user has
+ * edited (`edited_by_user = TRUE`). Parameterized DML so the row stays re-updatable.
+ */
+export async function upsertInsight(args: {
+  company: string;
+  insightText: string;
+  tasksHash: string;
+}): Promise<void> {
+  const company = args.company?.trim();
+  if (!company) throw new Error("upsertInsight: empty company");
+  await client().query({
+    query: `
+      MERGE ${ds("insight_cache")} T
+      USING (SELECT @company AS company_name) S
+      ON LOWER(TRIM(T.company_name)) = LOWER(TRIM(S.company_name))
+      WHEN MATCHED AND T.edited_by_user IS NOT TRUE THEN UPDATE SET
+        insight_text = @insightText,
+        tasks_hash = @tasksHash,
+        edited_by_user = FALSE,
+        updated_at = CURRENT_TIMESTAMP()
+      WHEN NOT MATCHED THEN INSERT
+        (company_name, insight_text, tasks_hash, edited_by_user, created_at, updated_at)
+        VALUES (@company, @insightText, @tasksHash, FALSE, CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP())`,
+    params: { company, insightText: args.insightText, tasksHash: args.tasksHash },
+    types: { company: "STRING", insightText: "STRING", tasksHash: "STRING" },
+  });
+}
+
+/** Save a user's insight edit — sets edited_by_user TRUE (blocks future regen). */
+export async function updateInsightText(
+  company: string,
+  insightText: string
+): Promise<void> {
+  if (!company?.trim()) throw new Error("updateInsightText: empty company");
+  await client().query({
+    query: `UPDATE ${ds("insight_cache")}
+      SET insight_text = @insightText, edited_by_user = TRUE, updated_at = CURRENT_TIMESTAMP()
+      WHERE LOWER(TRIM(company_name)) = LOWER(TRIM(@company))`,
+    params: { company, insightText },
+    types: { company: "STRING", insightText: "STRING" },
   });
 }
 
@@ -733,9 +817,10 @@ export async function getTaskArtifacts(args: {
     args.company != null
       ? Promise.resolve(args.company)
       : getResolvedCompany(args.taskId).then((c) => c ?? args.accountName ?? "");
-  const [research, billing, sol, brief, email] = await Promise.all([
+  const [research, billing, insight, sol, brief, email] = await Promise.all([
     companyP.then(getResearch),
     companyP.then(getBilling),
+    companyP.then(getInsight),
     getSolution(args.taskId, fHash),
     getBriefing(args.taskId, fHash),
     getEmail(args.taskId, fHash),
@@ -744,6 +829,7 @@ export async function getTaskArtifacts(args: {
     focalHash: fHash,
     research,
     billing,
+    insight,
     solution: sol.artifact,
     briefing: brief.artifact,
     email: email.artifact,

@@ -18,6 +18,11 @@ import Divider from "@mui/material/Divider";
 import Paper from "@mui/material/Paper";
 import Alert from "@mui/material/Alert";
 import Skeleton from "@mui/material/Skeleton";
+import Table from "@mui/material/Table";
+import TableHead from "@mui/material/TableHead";
+import TableBody from "@mui/material/TableBody";
+import TableRow from "@mui/material/TableRow";
+import TableCell from "@mui/material/TableCell";
 import CloseIcon from "@mui/icons-material/Close";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
@@ -42,10 +47,12 @@ const TABS = [
 ] as const;
 
 type ArtifactType = "research" | "solution" | "briefing" | "email";
+/** Artifacts a CE can inline-edit (single-body ones reuse `draftText`). */
+type EditableType = ArtifactType | "insight";
 
 /** A generation stage the client can drive; "refine" carries answers + comment. */
 type GenStage = {
-  type: ArtifactType | "refine";
+  type: ArtifactType | "refine" | "insight";
   body?: Record<string, unknown>;
 };
 
@@ -55,6 +62,7 @@ const STAGE_LABELS: Record<string, string> = {
   briefing: "Generating briefing…",
   email: "Generating email…",
   refine: "Refining solution…",
+  insight: "Generating insight…",
 };
 
 /**
@@ -252,9 +260,13 @@ function EditActions({
 
 export default function TaskDrawer({
   task,
+  allTasks,
+  onOpenTask,
   onClose,
 }: {
   task: Task | null;
+  allTasks: Task[];
+  onOpenTask: (t: Task) => void;
   onClose: () => void;
 }) {
   const [tab, setTab] = React.useState(0);
@@ -265,7 +277,7 @@ export default function TaskDrawer({
   // Generation: a label like "Generating solution…" while a POST is in flight.
   const [busy, setBusy] = React.useState<string | null>(null);
   // Inline editing: which artifact is being edited + its working copy + save state.
-  const [editing, setEditing] = React.useState<ArtifactType | null>(null);
+  const [editing, setEditing] = React.useState<EditableType | null>(null);
   const [saving, setSaving] = React.useState(false);
   const [draftText, setDraftText] = React.useState(""); // research / briefing body
   const [draftProblem, setDraftProblem] = React.useState("");
@@ -373,9 +385,78 @@ export default function TaskDrawer({
     ]);
   };
 
-  const startEdit = (type: ArtifactType) => {
+  // All tasks of this task's company (resolved name, case-insensitive). The insight
+  // reasons over the full set (incl. the open task); the table shows only the others.
+  const companyKey = (task?.company ?? "").trim().toLowerCase();
+  const companyTasks = React.useMemo(() => {
+    if (!companyKey) return [] as Task[];
+    const seen = new Set<string>();
+    const out: Task[] = [];
+    for (const t of allTasks) {
+      if ((t.company ?? "").trim().toLowerCase() !== companyKey) continue;
+      const sig = [t.id, t.column, t.status, t.ceAssigned, t.comment, t.ceComments].join(
+        ""
+      );
+      if (seen.has(sig)) continue;
+      seen.add(sig);
+      out.push(t);
+    }
+    return out;
+  }, [allTasks, companyKey]);
+  // Other tasks of the company, with exact-duplicate sheet rows collapsed. The
+  // sheet's ID column is not unique and some rows are full duplicates (same id,
+  // CE, status, comment), so dedup on the displayed content rather than id/uid.
+  const historyTasks = React.useMemo(() => {
+    const seen = new Set<string>();
+    const out: Task[] = [];
+    for (const t of companyTasks) {
+      if (t.uid === task?.uid) continue;
+      const sig = [t.id, t.column, t.status, t.ceAssigned, t.comment, t.ceComments]
+        .join("");
+      if (seen.has(sig)) continue;
+      seen.add(sig);
+      out.push(t);
+    }
+    return out;
+  }, [companyTasks, task?.uid]);
+
+  // Insight: account-level synthesis across ALL of the company's tasks.
+  const generateInsight = () =>
+    runChain([
+      {
+        type: "insight",
+        body: {
+          tasks: companyTasks.map((t) => ({
+            id: t.id,
+            comment: t.comment,
+            ceComments: t.ceComments,
+            status: t.status,
+            ceAssigned: t.ceAssigned,
+            specialization: t.specialization,
+            needs: t.needs,
+          })),
+        },
+      },
+    ]);
+
+  // Auto-generate the insight the first time the History tab is opened for a task
+  // whose company has no cached insight yet. Cache is company-keyed, so this fires
+  // at most once per company. The ref guards against re-firing (incl. on failure).
+  const insightAutoRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (tab !== 5 || !taskId || loading || busy) return;
+    if (!data || data.insight?.insight_text) return;
+    if (companyTasks.length === 0) return;
+    if (insightAutoRef.current === taskId) return;
+    insightAutoRef.current = taskId;
+    generateInsight();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, taskId, loading, busy, data, companyTasks.length]);
+
+  const startEdit = (type: EditableType) => {
     if (type === "research") setDraftText(data?.research?.research_text ?? "");
     if (type === "briefing") setDraftText(data?.briefing?.briefing_text ?? "");
+    if (type === "insight") setDraftText(data?.insight?.insight_text ?? "");
     if (type === "solution") {
       setDraftProblem(data?.solution?.problem_understanding ?? "");
       setDraftPrimary(data?.solution?.primary_solution ?? "");
@@ -395,7 +476,9 @@ export default function TaskDrawer({
     const fields =
       editing === "research"
         ? { researchText: draftText }
-        : editing === "briefing"
+        : editing === "insight"
+          ? { insightText: draftText }
+          : editing === "briefing"
           ? { briefingText: draftText }
           : editing === "email"
             ? {
@@ -434,6 +517,7 @@ export default function TaskDrawer({
     Solution: Boolean(data?.solution),
     Briefing: Boolean(data?.briefing),
     Email: Boolean(data?.email),
+    Insight: Boolean(data?.insight?.insight_text),
   };
 
   // Block every generate/refine/edit action until the cache lookup finishes —
@@ -510,7 +594,7 @@ export default function TaskDrawer({
               <Box sx={{ flexGrow: 1 }} />
               {/* Pipeline strip */}
               <Stack direction="row" spacing={1.25} alignItems="center">
-                {(["Research", "Solution", "Briefing", "Email"] as const).map((k) => (
+                {(["Research", "Solution", "Briefing", "Email", "Insight"] as const).map((k) => (
                   <Stack key={k} direction="row" spacing={0.5} alignItems="center">
                     <Box
                       sx={{
@@ -1010,9 +1094,133 @@ export default function TaskDrawer({
               )}
             </TabPanel>
 
-            {/* History (later slice) */}
+            {/* History: other tasks of this company + an account-level AI insight. */}
             <TabPanel value={tab} index={5}>
-              <EmptyState message="Account history — coming in a later step." />
+              <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
+                Tasks for {title}
+              </Typography>
+              {historyTasks.length === 0 ? (
+                <EmptyState message={`No other tasks for ${title} yet.`} />
+              ) : (
+                <Paper variant="outlined" sx={{ borderRadius: 2, overflow: "hidden" }}>
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Status</TableCell>
+                        <TableCell>CE</TableCell>
+                        <TableCell>Focal comment</TableCell>
+                        <TableCell>Work done</TableCell>
+                        <TableCell>Updated</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {historyTasks.map((t) => {
+                        const c = COLUMN_COLOR[t.column];
+                        return (
+                          <TableRow
+                            key={t.uid}
+                            hover
+                            onClick={() => onOpenTask(t)}
+                            sx={{ cursor: "pointer", verticalAlign: "top" }}
+                          >
+                            <TableCell>
+                              <Chip
+                                label={COLUMN_LABELS[t.column]}
+                                size="small"
+                                sx={{ bgcolor: c.bg, color: c.text, fontWeight: 600 }}
+                              />
+                            </TableCell>
+                            <TableCell sx={{ whiteSpace: "nowrap" }}>
+                              {t.ceAssigned || "—"}
+                            </TableCell>
+                            <TableCell sx={{ maxWidth: 260 }}>
+                              <Typography variant="body2" sx={{ display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+                                {t.comment || "—"}
+                              </Typography>
+                            </TableCell>
+                            <TableCell sx={{ maxWidth: 260 }}>
+                              <Typography variant="body2" color="text.secondary" sx={{ display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+                                {t.ceComments || "—"}
+                              </Typography>
+                            </TableCell>
+                            <TableCell sx={{ whiteSpace: "nowrap" }}>
+                              {t.lastUpdate || t.created || "—"}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </Paper>
+              )}
+
+              <Divider sx={{ my: 3 }} />
+
+              {/* Account-level AI insight across all of the company's tasks. */}
+              <Stack direction="row" spacing={1} sx={{ mb: 2 }} alignItems="center">
+                <Button
+                  size="small"
+                  variant={data?.insight?.insight_text ? "outlined" : "contained"}
+                  startIcon={
+                    busy === STAGE_LABELS.insight ? (
+                      <CircularProgress size={14} color="inherit" />
+                    ) : data?.insight?.insight_text ? (
+                      <RefreshIcon />
+                    ) : (
+                      <AutoAwesomeIcon />
+                    )
+                  }
+                  disabled={actionsDisabled || companyTasks.length === 0}
+                  onClick={generateInsight}
+                >
+                  {busy === STAGE_LABELS.insight
+                    ? "Generating…"
+                    : data?.insight?.insight_text
+                      ? "Regenerate"
+                      : "Generate insight"}
+                </Button>
+                {data?.insight?.insight_text && (
+                  <Button
+                    size="small"
+                    startIcon={<EditIcon />}
+                    disabled={actionsDisabled}
+                    onClick={() => startEdit("insight")}
+                  >
+                    Edit
+                  </Button>
+                )}
+              </Stack>
+
+              {editing === "insight" ? (
+                <>
+                  <TextField
+                    fullWidth
+                    multiline
+                    minRows={16}
+                    value={draftText}
+                    onChange={(e) => setDraftText(e.target.value)}
+                    label="Account Insight (Markdown)"
+                  />
+                  <EditActions saving={saving} onSave={saveEdit} onCancel={() => setEditing(null)} />
+                </>
+              ) : busy === STAGE_LABELS.insight ? (
+                <LoadingBlock />
+              ) : data?.insight?.insight_text ? (
+                <>
+                  <ArtifactHeader
+                    title="Account Insight"
+                    updatedAt={data.insight.updated_at}
+                    edited={data.insight.edited_by_user}
+                    copyText={data.insight.insight_text}
+                  />
+                  <Markdown>{data.insight.insight_text}</Markdown>
+                </>
+              ) : (
+                <EmptyState
+                  message="No account insight yet."
+                  hint="It generates automatically, or click Generate insight."
+                />
+              )}
             </TabPanel>
           </Box>
         </Box>

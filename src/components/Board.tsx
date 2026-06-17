@@ -275,7 +275,12 @@ export default function Board() {
         )}
       </Box>
 
-      <TaskDrawer task={selected} onClose={() => setSelected(null)} />
+      <TaskDrawer
+        task={selected}
+        allTasks={tasks}
+        onOpenTask={setSelected}
+        onClose={() => setSelected(null)}
+      />
 
       <MoveDialog
         request={moveRequest}

@@ -13,6 +13,7 @@ import {
   upsertSolutionRefinement,
   upsertBriefing,
   upsertEmail,
+  upsertInsight,
   upsertCompanyResolution,
   type DiscoveryAnswer,
 } from "@/lib/bigquery";
@@ -21,12 +22,20 @@ import { generateResearch } from "@/lib/agents/research";
 import { generateSolution, generateRefinedSolution } from "@/lib/agents/solution";
 import { generateBriefing } from "@/lib/agents/briefing";
 import { generateEmail } from "@/lib/agents/email";
+import { generateCompanyInsight, type InsightTask } from "@/lib/agents/insight";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 export const maxDuration = 800;
 
-type GenType = "research" | "solution" | "briefing" | "email" | "refine" | "all";
+type GenType =
+  | "research"
+  | "solution"
+  | "briefing"
+  | "email"
+  | "refine"
+  | "insight"
+  | "all";
 
 /**
  * POST /api/tasks/:id/generate  body: { type, answers?, comment? }
@@ -42,7 +51,12 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  let body: { type?: GenType; answers?: DiscoveryAnswer[]; comment?: string };
+  let body: {
+    type?: GenType;
+    answers?: DiscoveryAnswer[];
+    comment?: string;
+    tasks?: InsightTask[];
+  };
   try {
     body = await req.json();
   } catch {
@@ -102,6 +116,21 @@ export async function POST(
         additionalContext: comment,
         refinedSolution,
       });
+      const artifacts = await getTaskArtifacts({ taskId: id, company, focalComment: focal });
+      return NextResponse.json({ artifacts });
+    }
+
+    // Insight is company-scoped: it reasons over ALL of the company's tasks, which
+    // the client (which already holds the resolved board) sends in `tasks`.
+    if (type === "insight") {
+      const research = (await getResearch(company))?.research_text ?? undefined;
+      const tasks = Array.isArray(body.tasks) ? body.tasks : [];
+      const { insightText, tasksHash } = await generateCompanyInsight({
+        company,
+        tasks,
+        research,
+      });
+      await upsertInsight({ company, insightText, tasksHash });
       const artifacts = await getTaskArtifacts({ taskId: id, company, focalComment: focal });
       return NextResponse.json({ artifacts });
     }
