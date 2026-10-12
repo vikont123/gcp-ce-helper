@@ -24,6 +24,21 @@ export function isPlaceholderAccount(name: string | null | undefined): boolean {
   return PLACEHOLDER_ACCOUNTS.has((name ?? "").trim().toLowerCase());
 }
 
+/**
+ * Deterministic fast-path: many focal comments start with "Customer: <Name> (...)".
+ * Extract that name without an LLM call. Returns null when the comment isn't in
+ * that form, so the caller can fall back to the model.
+ */
+export function companyFromCommentPrefix(comment: string): string | null {
+  const m = (comment ?? "").match(/^\s*customer\s*[:\-–—]\s*(.+)/i);
+  if (!m) return null;
+  // Stop at the first description delimiter: bracket, sentence punctuation, or
+  // a spaced dash. Leaves just the company name.
+  const name = m[1].split(/[(\n.,;]| [-–—] /)[0].trim();
+  if (name.length < 2 || isPlaceholderAccount(name)) return null;
+  return name;
+}
+
 export interface ResolvedCompany {
   company: string;
   /** true when account_name was a placeholder and we extracted from the comment. */
@@ -50,11 +65,20 @@ export async function resolveCompanyName(
     return { company: account || "Unknown", usedFallback: false };
   }
 
+  // Deterministic fast-path for the "Customer: <Name>" format — no LLM call.
+  const fromPrefix = companyFromCommentPrefix(comment);
+  if (fromPrefix) {
+    return { company: fromPrefix, usedFallback: true };
+  }
+
+  // maxTokens must leave room for the model's thinking budget: MODEL_PRO is a
+  // thinking model, so too small a budget gets spent on reasoning and truncates
+  // the answer to garbage (e.g. "account", "thought"). 1024 is ample for a name.
   const answer = (
     await geminiComplete({
       system: RESOLVE_SYSTEM,
       user: `account_name: ${JSON.stringify(account)}\nfocal comment:\n${comment}`,
-      maxTokens: 40,
+      maxTokens: 1024,
     })
   )
     .replace(/^["'`]+|["'`.]+$/g, "")
